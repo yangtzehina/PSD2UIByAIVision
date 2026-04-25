@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psd-uiir"
+version = "0.1.0"
+description = "Local PSD-to-UIIR extraction pipeline with optional GPT-5.5 semantic refinement."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10.0",
+  "psd-tools[composite]>=1.15.0",
+  "openai>=2.0.0",
+]
+
+[project.optional-dependencies]
+vision = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.9",
+]
+ocr = [
+  "pytesseract>=0.3.13",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+uiir = "uiir.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

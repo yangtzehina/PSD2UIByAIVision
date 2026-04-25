@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import json
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .batch import _find_psd_files
+from .evaluate import evaluate_outputs
+from .pipeline import ExtractOptions, run_extract
+from .provider import LLMProviderConfig, missing_api_key_reason, provider_summary, resolve_api_key
+
+
+PREFERRED_OPENAI_SMOKE_FILES = ("interface.psd", "ui.psd")
+PIXEL_BASELINE = 0.88785
+PIXEL_MIN_RATIO = 0.95
+
+
+@dataclass
+class CompareOptions:
+    model: str = "gpt-5.5"
+    detail: str = "original"
+    limit: int = 2
+    prompt_version: str = "semantic_v1"
+    include_visual: bool = True
+    include_ocr: bool = False
+    min_area: int = 96
+    provider_name: str = "openai"
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: str | None = None
+    api_mode: str = "responses"
+
+
+def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: CompareOptions) -> dict[str, Any]:
+    if options.limit <= 0:
+        raise ValueError("--limit must be greater than 0")
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    provider = LLMProviderConfig(
+        provider_name=options.provider_name,
+        api_key_env=options.api_key_env,
+        base_url=options.base_url,
+        api_mode=options.api_mode,
+    ).normalized()
+    provider_info = provider_summary(provider)
+
+    if not resolve_api_key(provider):
+        report = {
+            "status": "skipped",
+            "reason": missing_api_key_reason(provider),
+            "model": options.model,
+            "detail": options.detail,
+            "prompt_version": options.prompt_version,
+            "limit": options.limit,
+            "provider": provider_info,
+            "created_at": _now(),
+        }
+        _write_report(out_dir, report)
+        return report
+
+    psd_paths = _select_psd_files(Path(input_dir).expanduser().resolve(), options.limit)
+    baseline_dir = out_dir / "baseline"
+    openai_dir = out_dir / "openai"
+    baseline_items = []
+    openai_items = []
+
+    for index, psd_path in enumerate(psd_paths, start=1):
+        slug = _slug(psd_path, index)
+        baseline_items.append(_extract_one(psd_path, baseline_dir / slug, options, use_openai=False))
+        openai_items.append(_extract_one(psd_path, openai_dir / slug, options, use_openai=True))
+
+    baseline_metrics = evaluate_outputs(baseline_dir, report_path=baseline_dir / "metrics.json")
+    openai_metrics = evaluate_outputs(openai_dir, report_path=openai_dir / "metrics.json")
+    comparisons = [_compare_pair(base, refined) for base, refined in zip(baseline_items, openai_items)]
+    report = {
+        "status": "ok",
+        "created_at": _now(),
+        "model": options.model,
+        "detail": options.detail,
+        "prompt_version": options.prompt_version,
+        "limit": options.limit,
+        "provider": provider_info,
+        "input": Path(input_dir).expanduser().resolve().as_posix(),
+        "output": out_dir.as_posix(),
+        "baseline": _metrics_summary(baseline_metrics),
+        "openai": _metrics_summary(openai_metrics),
+        "gates": _gates(baseline_metrics, openai_metrics),
+        "items": comparisons,
+    }
+    _write_report(out_dir, report)
+    _write_summary(out_dir, report)
+    return report
+
+
+def review_run(run_dir: str | Path) -> dict[str, Any]:
+    root = Path(run_dir).expanduser().resolve()
+    comparison_path = root / "comparison.json"
+    if not comparison_path.exists():
+        raise FileNotFoundError(comparison_path)
+    report = json.loads(comparison_path.read_text(encoding="utf-8"))
+    findings = []
+    if report.get("status") != "ok":
+        findings.append({"severity": "info", "message": f"Run status is {report.get('status')}: {report.get('reason', '')}".strip()})
+    for item in report.get("items", []):
+        name = item.get("name")
+        if item.get("unknown_delta", 0) > 0:
+            findings.append({"severity": "warning", "sample": name, "message": f"Unknown nodes increased by {item['unknown_delta']}"})
+        if item.get("invalid_parent_hints", 0) > 0:
+            findings.append({"severity": "warning", "sample": name, "message": f"{item['invalid_parent_hints']} OpenAI parent hints are invalid"})
+        if item.get("pixel_similarity_delta") is not None and item["pixel_similarity_delta"] < -0.04:
+            findings.append({"severity": "warning", "sample": name, "message": f"Pixel similarity dropped by {item['pixel_similarity_delta']:.5f}"})
+        if item.get("type_changes"):
+            findings.append({"severity": "info", "sample": name, "message": f"{len(item['type_changes'])} node/candidate type changes"})
+    review = {
+        "run": root.as_posix(),
+        "status": "ok",
+        "finding_count": len(findings),
+        "findings": findings,
+    }
+    (root / "review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+    (root / "review.md").write_text(_review_markdown(review), encoding="utf-8")
+    return review
+
+
+def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_openai: bool) -> dict[str, Any]:
+    artifacts = run_extract(
+        psd_path,
+        output_dir,
+        ExtractOptions(
+            include_visual=options.include_visual,
+            include_ocr=options.include_ocr,
+            min_area=options.min_area,
+            use_openai=use_openai,
+            model=options.model,
+            detail=options.detail,
+            openai_audit=use_openai,
+            prompt_version=options.prompt_version,
+            provider_name=options.provider_name,
+            api_key_env=options.api_key_env,
+            base_url=options.base_url,
+            api_mode=options.api_mode,
+        ),
+    )
+    return {
+        "source": psd_path.as_posix(),
+        "name": output_dir.name,
+        "output_dir": output_dir.as_posix(),
+        "uiir_json": artifacts.uiir_json.as_posix(),
+        "candidates_json": artifacts.candidates_json.as_posix(),
+    }
+
+
+def _select_psd_files(input_dir: Path, limit: int) -> list[Path]:
+    psd_paths = _find_psd_files(input_dir)
+    by_name = {path.name: path for path in psd_paths}
+    selected = [by_name[name] for name in PREFERRED_OPENAI_SMOKE_FILES if name in by_name]
+    for path in psd_paths:
+        if path not in selected:
+            selected.append(path)
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
+
+
+def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, Any]:
+    base_uiir = _load_json(base["uiir_json"])
+    refined_uiir = _load_json(refined["uiir_json"])
+    base_candidates = _load_json(base["candidates_json"])
+    refined_candidates = _load_json(refined["candidates_json"])
+    base_nodes = _flatten_nodes(base_uiir.get("root"))
+    refined_nodes = _flatten_nodes(refined_uiir.get("root"))
+    base_types = Counter(node.get("type") for node in base_nodes)
+    refined_types = Counter(node.get("type") for node in refined_nodes)
+    type_changes = _candidate_type_changes(base_candidates, refined_candidates)
+    baseline_visual = _metric_item(base["output_dir"])
+    openai_visual = _metric_item(refined["output_dir"])
+    base_pixel = baseline_visual.get("visual", {}).get("pixel_similarity")
+    openai_pixel = openai_visual.get("visual", {}).get("pixel_similarity")
+    return {
+        "name": refined["name"],
+        "source": refined["source"],
+        "baseline_output": base["output_dir"],
+        "openai_output": refined["output_dir"],
+        "baseline_node_count": len(base_nodes),
+        "openai_node_count": len(refined_nodes),
+        "baseline_type_counts": dict(base_types),
+        "openai_type_counts": dict(refined_types),
+        "unknown_delta": refined_types.get("Unknown", 0) - base_types.get("Unknown", 0),
+        "role_fill_delta": _fill_rate(refined_nodes, "role") - _fill_rate(base_nodes, "role"),
+        "layout_fill_delta": _fill_rate(refined_nodes, "layout") - _fill_rate(base_nodes, "layout"),
+        "parent_hint_fill_delta": _candidate_fill_rate(refined_candidates, "parent_hint") - _candidate_fill_rate(base_candidates, "parent_hint"),
+        "max_depth_delta": _max_depth(refined_uiir.get("root")) - _max_depth(base_uiir.get("root")),
+        "baseline_pixel_similarity": base_pixel,
+        "openai_pixel_similarity": openai_pixel,
+        "pixel_similarity_delta": None if base_pixel is None or openai_pixel is None else round(openai_pixel - base_pixel, 5),
+        "invalid_parent_hints": _invalid_parent_hints(refined_candidates),
+        "type_changes": type_changes,
+    }
+
+
+def _metric_item(output_dir: str | Path) -> dict[str, Any]:
+    metrics_path = Path(output_dir).parent / "metrics.json"
+    if not metrics_path.exists():
+        return {}
+    metrics = _load_json(metrics_path)
+    for item in metrics.get("items", []):
+        if item.get("output_dir") == str(output_dir):
+            return item
+    return {}
+
+
+def _candidate_type_changes(base_candidates: list[dict[str, Any]], refined_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refined_by_id = {candidate.get("id"): candidate for candidate in refined_candidates}
+    changes = []
+    for candidate in base_candidates:
+        refined = refined_by_id.get(candidate.get("id"))
+        if not refined:
+            continue
+        before = candidate.get("type_hint")
+        after = refined.get("type_hint")
+        if before != after:
+            changes.append({"candidate_id": candidate.get("id"), "before": before, "after": after})
+    return changes
+
+
+def _invalid_parent_hints(candidates: list[dict[str, Any]]) -> int:
+    ids = {candidate.get("id") for candidate in candidates}
+    layer_refs = {ref for candidate in candidates for ref in candidate.get("source_refs", []) if isinstance(ref, str) and ref.startswith("layer:")}
+    invalid = 0
+    for candidate in candidates:
+        hint = candidate.get("parent_hint")
+        if hint and hint not in ids and hint not in layer_refs:
+            invalid += 1
+    return invalid
+
+
+def _gates(baseline: dict[str, Any], openai: dict[str, Any]) -> dict[str, Any]:
+    baseline_pixel = baseline.get("avg_pixel_similarity")
+    openai_pixel = openai.get("avg_pixel_similarity")
+    pixel_floor = round((baseline_pixel or PIXEL_BASELINE) * PIXEL_MIN_RATIO, 5)
+    return {
+        "schema_ok_not_lower": openai.get("schema_ok", 0) >= baseline.get("schema_ok", 0),
+        "failed_zero": True,
+        "pixel_floor": pixel_floor,
+        "pixel_not_significantly_lower": openai_pixel is None or openai_pixel >= pixel_floor,
+    }
+
+
+def _metrics_summary(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "count": metrics.get("count"),
+        "schema_ok": metrics.get("schema_ok"),
+        "avg_pixel_similarity": metrics.get("avg_pixel_similarity"),
+        "report": metrics.get("report"),
+    }
+
+
+def _write_report(out_dir: Path, report: dict[str, Any]) -> None:
+    (out_dir / "comparison.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:
+    lines = [
+        "# OpenAI Smoke Regression Summary",
+        "",
+        f"- status: {report.get('status')}",
+        f"- provider: {report.get('provider', {}).get('provider_name')}",
+        f"- model: {report.get('model')}",
+        f"- prompt_version: {report.get('prompt_version')}",
+        f"- baseline avg pixel: {report.get('baseline', {}).get('avg_pixel_similarity')}",
+        f"- openai avg pixel: {report.get('openai', {}).get('avg_pixel_similarity')}",
+        f"- schema baseline/openai: {report.get('baseline', {}).get('schema_ok')}/{report.get('openai', {}).get('schema_ok')}",
+        "",
+        "## Items",
+    ]
+    for item in report.get("items", []):
+        lines.append(f"- {item['name']}: type_changes={len(item['type_changes'])}, unknown_delta={item['unknown_delta']}, pixel_delta={item['pixel_similarity_delta']}")
+    (out_dir / "regression_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _review_markdown(review: dict[str, Any]) -> str:
+    lines = ["# UIIR Run Review", "", f"Findings: {review['finding_count']}", ""]
+    for finding in review["findings"]:
+        sample = f" [{finding['sample']}]" if finding.get("sample") else ""
+        lines.append(f"- {finding['severity']}{sample}: {finding['message']}")
+    return "\n".join(lines) + "\n"
+
+
+def _load_json(path: str | Path) -> Any:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _flatten_nodes(root: Any) -> list[dict[str, Any]]:
+    if not isinstance(root, dict):
+        return []
+    result = []
+
+    def visit(node: dict[str, Any]) -> None:
+        result.append(node)
+        for child in node.get("children", []) or []:
+            if isinstance(child, dict):
+                visit(child)
+
+    visit(root)
+    return result
+
+
+def _fill_rate(nodes: list[dict[str, Any]], field: str) -> float:
+    relevant = [node for node in nodes if node.get("type") != "Screen"]
+    if not relevant:
+        return 0.0
+    return round(sum(1 for node in relevant if node.get(field)) / len(relevant), 5)
+
+
+def _candidate_fill_rate(candidates: list[dict[str, Any]], field: str) -> float:
+    if not candidates:
+        return 0.0
+    return round(sum(1 for candidate in candidates if candidate.get(field)) / len(candidates), 5)
+
+
+def _max_depth(root: Any) -> int:
+    if not isinstance(root, dict):
+        return 0
+    children = [child for child in root.get("children", []) or [] if isinstance(child, dict)]
+    if not children:
+        return 1
+    return 1 + max(_max_depth(child) for child in children)
+
+
+def _slug(path: Path, index: int) -> str:
+    slug = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in path.stem).strip("._")
+    return slug or f"item_{index}"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

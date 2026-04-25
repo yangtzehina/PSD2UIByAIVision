@@ -1,0 +1,16 @@
+{
+  "version": "semantic_v1",
+  "purpose": "Classify PSD UI candidates and refine role, text, layout, style, and parent hints without inventing coordinates.",
+  "model_default": "gpt-5.5",
+  "detail_default": "original",
+  "rules": [
+    "Do not invent pixel coordinates.",
+    "Return one item per useful candidate id when possible.",
+    "Prefer PSD layer text over OCR guesses.",
+    "Use Unknown for ambiguous decorative elements.",
+    "Use List/Grid/ScrollView only for repeated or scrollable regions.",
+    "style may be empty unless a supplied text style is clearly useful.",
+    "parent_candidate_id may be empty when uncertain.",
+    "component_group_id may be empty; use it only when multiple candidates should be wrapped into one UI component."
+  ]
+}
