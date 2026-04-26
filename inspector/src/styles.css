@@ -148,10 +148,15 @@ select {
 }
 
 .diffStats,
-.diffList {
+.diffList,
+.renderIssues {
   display: grid;
   gap: 8px;
   padding: 10px;
+}
+
+.renderIssues > strong {
+  font-size: 13px;
 }
 
 .diffItem {

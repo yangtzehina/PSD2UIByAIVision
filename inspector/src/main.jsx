@@ -67,6 +67,8 @@ const openAISemanticsSchema = {
 
 function App() {
   const [imageUrl, setImageUrl] = useState("");
+  const [graphImageUrl, setGraphImageUrl] = useState("");
+  const [renderDiffImageUrl, setRenderDiffImageUrl] = useState("");
   const [semanticImageDataUrl, setSemanticImageDataUrl] = useState("");
   const [uiir, setUiir] = useState(null);
   const [baselineUiir, setBaselineUiir] = useState(null);
@@ -76,6 +78,7 @@ function App() {
   const [visionQuarantined, setVisionQuarantined] = useState([]);
   const [visionRejected, setVisionRejected] = useState([]);
   const [semanticPatches, setSemanticPatches] = useState([]);
+  const [renderReview, setRenderReview] = useState(null);
   const [xml, setXml] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [corrections, setCorrections] = useState([]);
@@ -83,6 +86,7 @@ function App() {
   const [providerResult, setProviderResult] = useState(null);
   const [treeMode, setTreeMode] = useState("uiir");
   const [boxFilter, setBoxFilter] = useState("all");
+  const [stageMode, setStageMode] = useState("box");
   const nodes = useMemo(() => flattenNodes(uiir?.root), [uiir]);
   const psdTree = useMemo(() => buildPsdTree(nodes), [nodes]);
   const baselineNodes = useMemo(() => flattenNodes(baselineUiir?.root), [baselineUiir]);
@@ -99,10 +103,14 @@ function App() {
   const selected = selectedCandidate || selectedNode;
   const selectedUsesCandidate = Boolean(selectedCandidate);
   const selectedGoldenDecision = selected ? getGoldenDecision(goldenDecisions, selected, selectedUsesCandidate) : null;
+  const stageImageUrl = stageMode === "graph" ? graphImageUrl || imageUrl : stageMode === "render" ? renderDiffImageUrl || imageUrl : imageUrl;
+  const stageAlt = stageMode === "graph" ? "Graph overlay" : stageMode === "render" ? "Render diff" : "PSD composite";
 
   const loadDemo = () => {
     const demo = createDemoData();
     setImageUrl(demo.imageDataUrl);
+    setGraphImageUrl("");
+    setRenderDiffImageUrl("");
     setSemanticImageDataUrl(demo.imageDataUrl);
     setUiir(demo.uiir);
     setBaselineUiir(null);
@@ -112,6 +120,7 @@ function App() {
     setVisionQuarantined([]);
     setVisionRejected([]);
     setSemanticPatches([]);
+    setRenderReview(null);
     setXml(demo.xml);
     setCorrections([]);
     setGoldenDecisions([]);
@@ -176,6 +185,8 @@ function App() {
         </div>
 
         <FileInput icon={<ImageIcon size={18} />} label="Composite/Overlay PNG" accept="image/*" onFile={readImage(setImageUrl, setSemanticImageDataUrl)} />
+        <FileInput icon={<ImageIcon size={18} />} label="graph_overlay.png" accept="image/*" onFile={readImage(setGraphImageUrl)} />
+        <FileInput icon={<ImageIcon size={18} />} label="render_diff.png" accept="image/*" onFile={readImage(setRenderDiffImageUrl)} />
         <FileInput icon={<FileJson size={18} />} label="uiir.json" accept=".json,application/json" onFile={readJson(setUiir)} />
         <FileInput icon={<FileJson size={18} />} label="baseline uiir.json" accept=".json,application/json" onFile={readJson(setBaselineUiir)} />
         <FileInput icon={<FileJson size={18} />} label="comparison.json" accept=".json,application/json" onFile={readJson(setComparison)} />
@@ -184,6 +195,7 @@ function App() {
         <FileInput icon={<FileJson size={18} />} label="vision_quarantined.json" accept=".json,application/json" onFile={readJson(setVisionQuarantined)} />
         <FileInput icon={<FileJson size={18} />} label="vision_rejected.json" accept=".json,application/json" onFile={readJson(setVisionRejected)} />
         <FileInput icon={<FileJson size={18} />} label="semantic_patches.json" accept=".json,application/json" onFile={readJson(setSemanticPatches)} />
+        <FileInput icon={<FileJson size={18} />} label="render_review.json" accept=".json,application/json" onFile={readJson(setRenderReview)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
         <FileInput icon={<FileJson size={18} />} label="corrections.json" accept=".json,application/json" onFile={readCorrections(setCorrections)} />
         <FileInput icon={<FileJson size={18} />} label="golden_decisions.json" accept=".json,application/json" onFile={readGoldenDecisions(setGoldenDecisions)} />
@@ -199,9 +211,25 @@ function App() {
           <Metric label="Layers" value={layers.length || "0"} />
           <Metric label="Quarantine" value={quarantinedBoxes.length || "0"} />
           <Metric label="Rejected" value={rejectedBoxes.length || "0"} />
+          <Metric label="Render Issues" value={renderReview?.issue_count ?? renderReview?.issues?.length ?? "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
           <Metric label="Decisions" value={goldenDecisions.length || "0"} />
           <Metric label="Diffs" value={Object.keys(diffByNodeId).length || "0"} />
+        </section>
+
+        <section className="reviewFilters">
+          <header>Review View</header>
+          <div className="segmented vertical">
+            {[
+              ["box", "Box Overlay"],
+              ["graph", "Graph Overlay"],
+              ["render", "Render Diff"],
+            ].map(([value, label]) => (
+              <button key={value} className={stageMode === value ? "active" : ""} type="button" onClick={() => setStageMode(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
         </section>
 
         <section className="reviewFilters">
@@ -222,7 +250,7 @@ function App() {
           </div>
         </section>
 
-        <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} />
+        <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} renderReview={renderReview} />
         <ProviderSmokePanel
           imageDataUrl={semanticImageDataUrl}
           candidates={candidates}
@@ -252,10 +280,10 @@ function App() {
 
       <section className="workspace">
         <div className="stage">
-          {imageUrl ? (
+          {stageImageUrl ? (
             <div className="imageWrap">
-              <img src={imageUrl} alt="PSD composite" />
-              {boxes.map((box, index) => {
+              <img src={stageImageUrl} alt={stageAlt} />
+              {stageMode === "box" ? boxes.map((box, index) => {
                 const correction = getCorrection(corrections, box, usingCandidates);
                 return (
                   <OverlayBox
@@ -269,7 +297,7 @@ function App() {
                     onClick={() => setSelectedId(box.id || "")}
                   />
                 );
-              })}
+              }) : null}
             </div>
           ) : (
             <div className="empty">
@@ -300,8 +328,8 @@ function App() {
   );
 }
 
-function DiffPanel({ comparison, diffCount }) {
-  if (!comparison && !diffCount) return null;
+function DiffPanel({ comparison, diffCount, renderReview }) {
+  if (!comparison && !diffCount && !renderReview) return null;
   return (
     <section className="diffPanel">
       <header>OpenAI Diff</header>
@@ -324,6 +352,19 @@ function DiffPanel({ comparison, diffCount }) {
         ))}
         {!comparison ? <Muted text="Load comparison.json" /> : null}
       </div>
+      {renderReview ? (
+        <div className="renderIssues">
+          <strong>Render Review</strong>
+          {(renderReview.issues || []).slice(0, 6).map((issue) => (
+            <div className="diffItem" key={issue.id || `${issue.type}-${issue.reason}`}>
+              <strong>{issue.type || "issue"}</strong>
+              <span>{issue.severity || "n/a"}</span>
+              <span>{issue.reason || ""}</span>
+            </div>
+          ))}
+          {!(renderReview.issues || []).length ? <Muted text="No render issues" /> : null}
+        </div>
+      ) : null}
     </section>
   );
 }

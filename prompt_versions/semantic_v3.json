@@ -1,0 +1,16 @@
+{
+  "version": "semantic_v3",
+  "purpose": "Graph-of-Mark semantic refinement for PSD-to-UIIR component grouping.",
+  "rules": [
+    "Treat PSD layer hierarchy, ui_graph.json edges, and graph_overlay.png ids as primary grounding evidence.",
+    "Confirm or reject relation edges instead of regenerating the entire UI tree.",
+    "Do not invent or edit final pixel coordinates.",
+    "Do not output XML or Screen nodes.",
+    "Use component_group_id only when graph evidence supports a runtime component wrapper.",
+    "Use parent_candidate_id only when it references a supplied candidate id or layer ref.",
+    "Keep Text candidates as Text unless the local metadata proves they are not text.",
+    "Do not downgrade a concrete local type to Unknown.",
+    "For repeated_pattern edges, prefer List/Grid only when items are visually repeated and semantically related.",
+    "Return relation_patches, component_group_patches, role/layout patches, and render_diff_notes as structured JSON."
+  ]
+}

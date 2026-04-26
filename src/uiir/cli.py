@@ -7,10 +7,14 @@ from pathlib import Path
 
 from .batch import run_batch
 from .compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
+from .curate import curate_run
 from .evaluate import evaluate_outputs
 from .fixtures import download_fixture_set, list_fixture_sets
 from .golden import build_golden_from_decisions
+from .graph import build_ui_graph
 from .pipeline import ExtractOptions, run_extract
+from .provider import LLMProviderConfig
+from .render_review import review_render
 from .schema import UIIR_JSON_SCHEMA
 
 
@@ -70,6 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     golden_build.add_argument("--decisions", required=True, help="golden_decisions.json exported from the inspector.")
     golden_build.add_argument("--out", required=True, help="Output golden sample directory.")
 
+    graph = subparsers.add_parser("graph", help="Build deterministic UI relation graphs.")
+    graph_subparsers = graph.add_subparsers(dest="graph_command", required=True)
+    graph_build = graph_subparsers.add_parser("build", help="Build ui_graph.json and graph_overlay.png for an extract output.")
+    graph_build.add_argument("output", help="Output directory from uiir extract or a single batch item.")
+    graph_build.add_argument("--out", help="Graph output directory. Defaults to the extract output directory.")
+
+    render_review = subparsers.add_parser("review-render", help="Review replay render differences and write render_review.json.")
+    render_review.add_argument("output", help="Output directory from uiir extract or a single batch item.")
+    render_review.add_argument("--out", help="Review output directory. Defaults to the extract output directory.")
+    render_review.add_argument("--use-openai", action="store_true", help="Request optional OpenAI render review when configured.")
+    render_review.add_argument("--model", default="gpt-5.5", help="Model label for optional render review.")
+    _add_provider_args(render_review)
+
+    curate = subparsers.add_parser("curate", help="Create a curation queue from run outputs.")
+    curate.add_argument("run", help="Run root containing comparison.json or extract outputs.")
+    curate.add_argument("--golden", help="Optional local golden directory.")
+    curate.add_argument("--out", required=True, help="Output directory for curation_queue.json and .md.")
+
     compare = subparsers.add_parser("compare-openai", help="Compare local baseline against GPT-5.5 semantic refinement.")
     compare.add_argument("input", help="Input PSD/PSB file or fixture directory.")
     compare.add_argument("--out", required=True, help="Output comparison directory.")
@@ -80,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_vision_args(compare)
     _add_document_args(compare)
     _add_provider_args(compare)
+    _add_graph_args(compare)
     compare.add_argument("--golden", help="Optional golden UIIR directory for comparison metrics.")
     compare.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
     compare.add_argument("--min-area", type=int, default=96, help="Minimum candidate area in pixels.")
@@ -96,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     iterate.add_argument("--golden", help="Optional golden UIIR directory for leaderboard metrics.")
     _add_document_args(iterate)
     _add_provider_args(iterate)
+    _add_graph_args(iterate)
     iterate.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
     iterate.add_argument("--min-area", type=int, default=96, help="Minimum candidate area in pixels.")
 
@@ -116,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
         return _evaluate(args)
     if args.command == "golden":
         return _golden(args)
+    if args.command == "graph":
+        return _graph(args)
+    if args.command == "review-render":
+        return _render_review(args)
+    if args.command == "curate":
+        return _curate(args)
     if args.command == "compare-openai":
         return _compare_openai(args)
     if args.command == "iterate-openai":
@@ -184,6 +214,9 @@ def _compare_openai(args: argparse.Namespace) -> int:
         vision_policy=args.vision_policy,
         document_kind=args.document_kind,
         golden_root=args.golden,
+        graph_overlay=args.graph_overlay,
+        render_review=args.render_review,
+        curation_report=args.curation_report,
     )
     try:
         report = run_compare_openai(args.input, args.out, options)
@@ -219,6 +252,9 @@ def _iterate_openai(args: argparse.Namespace) -> int:
         golden_root=args.golden,
         prompt_versions=_parse_csv(args.prompts) or (args.prompt_version,),
         policies=_parse_csv(args.policies) or ("audit", "strict", "balanced"),
+        graph_overlay=args.graph_overlay,
+        render_review=args.render_review,
+        curation_report=args.curation_report,
     )
     try:
         report = run_iterate_openai(args.input, args.out, options)
@@ -261,6 +297,52 @@ def _golden(args: argparse.Namespace) -> int:
         print(f"manifest: {Path(args.out).expanduser().resolve() / 'manifest.json'}")
         return 0
     return 1
+
+
+def _graph(args: argparse.Namespace) -> int:
+    if args.graph_command == "build":
+        try:
+            result = build_ui_graph(args.output, args.out)
+        except Exception as exc:
+            print(f"uiir graph build failed: {exc}", file=sys.stderr)
+            return 2
+        print("UIIR graph build complete")
+        print(f"graph: {result.graph_json}")
+        print(f"overlay: {result.graph_overlay}")
+        print(f"edges: {result.graph.get('stats', {}).get('edge_count', 0)}")
+        return 0
+    return 1
+
+
+def _render_review(args: argparse.Namespace) -> int:
+    provider = LLMProviderConfig(
+        provider_name=args.provider_name,
+        api_key_env=args.api_key_env,
+        base_url=args.base_url,
+        api_mode=args.api_mode,
+    )
+    try:
+        report = review_render(args.output, args.out, use_openai=args.use_openai, provider=provider, model=args.model)
+    except Exception as exc:
+        print(f"uiir review-render failed: {exc}", file=sys.stderr)
+        return 2
+    print("UIIR render review complete")
+    print(f"status: {report.get('status')}")
+    print(f"issues: {report.get('issue_count', len(report.get('issues', []) or []))}")
+    print(f"review: {(Path(args.out).expanduser().resolve() if args.out else Path(args.output).expanduser().resolve()) / 'render_review.json'}")
+    return 0 if report.get("status") == "ok" else 1
+
+
+def _curate(args: argparse.Namespace) -> int:
+    try:
+        report = curate_run(args.run, golden_root=args.golden, output_dir=args.out)
+    except Exception as exc:
+        print(f"uiir curate failed: {exc}", file=sys.stderr)
+        return 2
+    print("UIIR curation queue complete")
+    print(f"samples: {report['count']}")
+    print(f"queue: {Path(args.out).expanduser().resolve() / 'curation_queue.json'}")
+    return 0
 
 
 def _fixtures(args: argparse.Namespace) -> int:
@@ -394,6 +476,12 @@ def _add_document_args(parser: argparse.ArgumentParser) -> None:
         choices=("auto", "screen", "asset_sheet"),
         help="PSD intent classification. Defaults to auto.",
     )
+
+
+def _add_graph_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--graph-overlay", action="store_true", help="Build ui_graph.json and graph_overlay.png for each sample.")
+    parser.add_argument("--render-review", action="store_true", help="Write render_review.json and render_diff.png for each sample.")
+    parser.add_argument("--curation-report", action="store_true", help="Write curation_queue.json for the run.")
 
 
 if __name__ == "__main__":

@@ -224,6 +224,47 @@ uiir iterate-openai fixtures/openai-smoke --out out/runs/provider-vision \
 
 `iterate-openai` 会依次跑 `semantic_v2 + audit/strict/balanced`，输出 `leaderboard.json` 和 `leaderboard.md`，用 schema、pixel gate、invalid parent、Unknown、type changes、semantic fill 等指标排序。
 
+## PSD-Aware Graph-of-Mark
+
+在 SoM 编号 overlay 之外，下一层可解释信号是本地关系图：把 PSD parent、几何包含、同行同列、同尺寸、重复模式、文字压在图片上、候选组件组合等关系写成 `ui_graph.json`，并渲染为 `graph_overlay.png`。GPT 分支可以读取这张图来做关系确认和局部审查，但仍不能直接写 XML 或覆盖 PSD 坐标。
+
+离线生成单个样本的关系图：
+
+```bash
+uiir graph build out/game-ui-smoke/interface --out out/game-ui-smoke/interface
+```
+
+渲染审查会对比 `composite.png`、`replay_preview.png` 和 `diagnostic_overlay.png`，输出 `render_diff.png` 与 `render_review.json`。发现的 missing/extra/misclassified 区域只进入审计和 quarantine，不会直接污染 UIIR：
+
+```bash
+uiir review-render out/game-ui-smoke/interface --out out/game-ui-smoke/interface
+```
+
+OpenAI 对比和迭代可以打开关系图、渲染审查和主动学习队列：
+
+```bash
+uiir compare-openai fixtures/openai-smoke --out out/graph-vision-smoke \
+  --provider-name third-party \
+  --api-key-env UIIR_PROVIDER_API_KEY \
+  --base-url "$UIIR_OPENAI_BASE_URL" \
+  --api-mode chat-completions \
+  --model gpt-5.5 \
+  --limit 2 \
+  --openai-vision-proposals \
+  --vision-policy strict \
+  --graph-overlay \
+  --render-review \
+  --curation-report
+```
+
+主动学习采样会把 quarantine 多、prompt/policy 分歧大、golden 指标低、关系图复杂、render issue 多的样本排到前面，减少人工确认成本：
+
+```bash
+uiir curate out/graph-vision-smoke --golden goldens/local --out out/curation
+```
+
+新增产物包括 `ui_graph.json`、`graph_overlay.png`、`render_review.json`、`render_diff.png`、`curation_queue.json` 和 `curation_queue.md`。`leaderboard` 现在也会记录 `relation_precision`、`relation_recall`、`component_group_f1`、`render_review_issue_count` 和 `curation_value_score`。
+
 ## Quarantine-to-Golden 闭环
 
 `strict` 策略会把无本地几何证据的新视觉提案写入 `vision_quarantined.json`。人工确认后，可以把这些隔离提案沉淀成本地 golden：
@@ -270,7 +311,7 @@ uiir iterate-openai fixtures/openai-smoke --out out/runs/provider-vision \
   --policies audit,strict,balanced
 ```
 
-每个子 run 会写 `experiment_manifest.json`，只记录 `api_key_env`、`api_key_present` 和 `base_url_present`，不记录 token 或真实 base URL。`leaderboard` 会综合 schema、pixel gate、invalid parent、Unknown、type changes、golden F1、proposal recall、relation F1 和 quarantine usefulness 排序。
+每个子 run 会写 `experiment_manifest.json`，只记录 `api_key_env`、`api_key_present` 和 `base_url_present`，不记录 token 或真实 base URL。`leaderboard` 会综合 schema、pixel gate、invalid parent、Unknown、type changes、golden F1、proposal recall、relation precision/recall/F1、component group F1、render review issues 和 quarantine usefulness 排序。
 
 第三方 provider 的 smoke 方式相同，只是把 key 环境变量和 base URL 换掉：
 

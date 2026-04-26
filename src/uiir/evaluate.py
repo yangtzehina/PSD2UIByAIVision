@@ -27,6 +27,9 @@ def evaluate_outputs(output_root: str | Path, golden_root: str | Path | None = N
         "avg_proposal_precision": _average([item.get("golden", {}).get("proposal_precision") for item in items]),
         "avg_proposal_recall": _average([item.get("golden", {}).get("proposal_recall") for item in items]),
         "avg_relation_f1": _average([item.get("golden", {}).get("relation_f1") for item in items]),
+        "avg_relation_precision": _average([item.get("golden", {}).get("relation_precision") for item in items]),
+        "avg_relation_recall": _average([item.get("golden", {}).get("relation_recall") for item in items]),
+        "avg_component_group_f1": _average([item.get("golden", {}).get("component_group_f1") for item in items]),
         "avg_human_accept_rate": _average([item.get("golden", {}).get("human_accept_rate") for item in items]),
         "avg_quarantine_usefulness": _average([item.get("golden", {}).get("quarantine_usefulness") for item in items]),
         "items": items,
@@ -182,7 +185,8 @@ def _golden_metrics(nodes: list[dict[str, Any]], golden_nodes: list[dict[str, An
     recall = overlap / len(expected) if expected else 0.0
     type_f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     proposal_precision, proposal_recall = _proposal_metrics(predicted, expected)
-    relation_f1 = _relation_f1(predicted, expected)
+    relation_precision, relation_recall, relation_f1 = _relation_scores(predicted, expected)
+    component_group_f1 = _component_group_f1(predicted, expected)
     decision_rates = _decision_rates(golden_data or {})
     return {
         "node_count_delta": len(predicted) - len(expected),
@@ -191,7 +195,10 @@ def _golden_metrics(nodes: list[dict[str, Any]], golden_nodes: list[dict[str, An
         "tree_distance_proxy": abs(len(predicted) - len(expected)) + sum(abs(predicted_types[key] - expected_types[key]) for key in set(predicted_types) | set(expected_types)),
         "proposal_precision": proposal_precision,
         "proposal_recall": proposal_recall,
+        "relation_precision": relation_precision,
+        "relation_recall": relation_recall,
         "relation_f1": relation_f1,
+        "component_group_f1": component_group_f1,
         **decision_rates,
     }
 
@@ -214,14 +221,26 @@ def _proposal_refs(nodes: list[dict[str, Any]]) -> set[str]:
     return refs
 
 
-def _relation_f1(predicted: list[dict[str, Any]], expected: list[dict[str, Any]]) -> float:
+def _relation_scores(predicted: list[dict[str, Any]], expected: list[dict[str, Any]]) -> tuple[float, float, float]:
     predicted_pairs = _relation_pairs(predicted)
     expected_pairs = _relation_pairs(expected)
     if not predicted_pairs and not expected_pairs:
-        return 1.0
+        return 1.0, 1.0, 1.0
     overlap = len(predicted_pairs & expected_pairs)
     precision = overlap / len(predicted_pairs) if predicted_pairs else 0.0
     recall = overlap / len(expected_pairs) if expected_pairs else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return round(precision, 5), round(recall, 5), round(f1, 5)
+
+
+def _component_group_f1(predicted: list[dict[str, Any]], expected: list[dict[str, Any]]) -> float:
+    predicted_groups = _component_groups(predicted)
+    expected_groups = _component_groups(expected)
+    if not predicted_groups and not expected_groups:
+        return 1.0
+    overlap = len(predicted_groups & expected_groups)
+    precision = overlap / len(predicted_groups) if predicted_groups else 0.0
+    recall = overlap / len(expected_groups) if expected_groups else 0.0
     return round(2 * precision * recall / (precision + recall), 5) if precision + recall else 0.0
 
 
@@ -235,6 +254,18 @@ def _relation_pairs(nodes: list[dict[str, Any]]) -> set[tuple[str, str]]:
         child_id = metadata.get("candidateId") or next(iter(node.get("sourceRefs", []) or []), node.get("id"))
         pairs.add((str(group_id), str(child_id)))
     return pairs
+
+
+def _component_groups(nodes: list[dict[str, Any]]) -> set[tuple[str, tuple[str, ...]]]:
+    groups: dict[str, list[str]] = {}
+    for node in nodes:
+        metadata = node.get("metadata", {}) or {}
+        group_id = metadata.get("openaiComponentGroupId") or metadata.get("componentGroupId")
+        if not group_id:
+            continue
+        child_id = metadata.get("candidateId") or next(iter(node.get("sourceRefs", []) or []), node.get("id"))
+        groups.setdefault(str(group_id), []).append(str(child_id))
+    return {(group_id, tuple(sorted(children))) for group_id, children in groups.items()}
 
 
 def _decision_rates(golden_data: dict[str, Any]) -> dict[str, float | None]:

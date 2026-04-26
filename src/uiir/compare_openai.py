@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from .batch import _find_psd_files
+from .curate import curate_run
 from .evaluate import evaluate_outputs
+from .graph import build_ui_graph
 from .pipeline import ExtractOptions, run_extract
 from .provider import LLMProviderConfig, missing_api_key_reason, provider_summary, resolve_api_key
+from .render_review import review_render
 
 
 PREFERRED_OPENAI_SMOKE_FILES = ("interface.psd", "ui.psd")
@@ -38,6 +41,9 @@ class CompareOptions:
     vision_policy: str = "strict"
     document_kind: str = "auto"
     golden_root: str | Path | None = None
+    graph_overlay: bool = False
+    render_review: bool = False
+    curation_report: bool = False
 
 
 @dataclass
@@ -57,6 +63,9 @@ class IterateOptions:
     golden_root: str | Path | None = None
     prompt_versions: tuple[str, ...] = ("semantic_v2",)
     policies: tuple[str, ...] = ("audit", "strict", "balanced")
+    graph_overlay: bool = False
+    render_review: bool = False
+    curation_report: bool = False
 
 
 def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: CompareOptions) -> dict[str, Any]:
@@ -86,6 +95,9 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
             "vision_policy": options.vision_policy,
             "document_kind": options.document_kind,
             "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+            "graph_overlay": options.graph_overlay,
+            "render_review": options.render_review,
+            "curation_report": options.curation_report,
             "provider": provider_info,
             "created_at": _now(),
         }
@@ -118,6 +130,9 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
         "vision_policy": options.vision_policy,
         "document_kind": options.document_kind,
         "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+        "graph_overlay": options.graph_overlay,
+        "render_review": options.render_review,
+        "curation_report": options.curation_report,
         "provider": provider_info,
         "input": Path(input_dir).expanduser().resolve().as_posix(),
         "output": out_dir.as_posix(),
@@ -128,6 +143,9 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
     }
     _write_report(out_dir, report)
     _write_summary(out_dir, report)
+    if options.curation_report:
+        report["curation"] = curate_run(out_dir, golden_root=options.golden_root, output_dir=out_dir / "curation")
+        _write_report(out_dir, report)
     return report
 
 
@@ -152,6 +170,9 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
             "policies": list(options.policies),
             "document_kind": options.document_kind,
             "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+            "graph_overlay": options.graph_overlay,
+            "render_review": options.render_review,
+            "curation_report": options.curation_report,
             "provider": provider_info,
             "created_at": _now(),
             "runs": [],
@@ -187,6 +208,9 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
                     vision_policy=policy,
                     document_kind=options.document_kind,
                     golden_root=options.golden_root,
+                    graph_overlay=options.graph_overlay,
+                    render_review=options.render_review,
+                    curation_report=False,
                 ),
             )
             seconds = round(time.perf_counter() - started, 3)
@@ -204,10 +228,16 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
         "policies": list(options.policies),
         "document_kind": options.document_kind,
         "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+        "graph_overlay": options.graph_overlay,
+        "render_review": options.render_review,
+        "curation_report": options.curation_report,
         "provider": provider_info,
         "runs": runs,
     }
     _write_leaderboard(out_dir, report)
+    if options.curation_report:
+        report["curation"] = curate_run(out_dir, golden_root=options.golden_root, output_dir=out_dir / "curation")
+        _write_leaderboard(out_dir, report)
     return report
 
 
@@ -268,12 +298,25 @@ def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_
             document_kind=options.document_kind,
         ),
     )
+    graph_json = None
+    graph_overlay = None
+    render_review_json = None
+    if options.graph_overlay:
+        graph_result = build_ui_graph(output_dir)
+        graph_json = graph_result.graph_json.as_posix()
+        graph_overlay = graph_result.graph_overlay.as_posix()
+    if options.render_review:
+        render_report = review_render(output_dir)
+        render_review_json = (output_dir / "render_review.json").as_posix() if render_report else None
     return {
         "source": psd_path.as_posix(),
         "name": output_dir.name,
         "output_dir": output_dir.as_posix(),
         "uiir_json": artifacts.uiir_json.as_posix(),
         "candidates_json": artifacts.candidates_json.as_posix(),
+        "ui_graph_json": graph_json,
+        "graph_overlay": graph_overlay,
+        "render_review_json": render_review_json,
     }
 
 
@@ -301,6 +344,8 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
     type_changes = _candidate_type_changes(base_candidates, refined_candidates)
     semantic_patch_counts = _semantic_patch_counts(refined_candidates)
     vision_counts = _vision_counts(refined["output_dir"], refined_candidates)
+    graph_counts = _graph_counts(refined["output_dir"])
+    render_counts = _render_review_counts(refined["output_dir"])
     baseline_visual = _metric_item(base["output_dir"])
     openai_visual = _metric_item(refined["output_dir"])
     base_pixel = baseline_visual.get("visual", {}).get("pixel_similarity")
@@ -337,6 +382,10 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
         "type_guard_rejections": semantic_patch_counts.get("type_guard_rejections", 0),
         "vision": vision_counts,
         "quarantined_proposals": vision_counts.get("quarantined_proposals", 0),
+        "graph": graph_counts,
+        "relation_count": graph_counts.get("edge_count", 0),
+        "render_review": render_counts,
+        "render_review_issue_count": render_counts.get("issue_count", 0),
         "baseline_golden": baseline_visual.get("golden"),
         "openai_golden": openai_visual.get("golden"),
     }
@@ -406,6 +455,34 @@ def _vision_counts(output_dir: str | Path, candidates: list[dict[str, Any]]) -> 
     }
 
 
+def _graph_counts(output_dir: str | Path) -> dict[str, Any]:
+    graph_path = Path(output_dir) / "ui_graph.json"
+    if not graph_path.exists():
+        return {"edge_count": 0, "edge_type_counts": {}}
+    graph = _load_json(graph_path)
+    stats = graph.get("stats", {}) or {}
+    return {
+        "path": graph_path.as_posix(),
+        "node_count": stats.get("node_count", 0),
+        "edge_count": stats.get("edge_count", 0),
+        "edge_type_counts": stats.get("edge_type_counts", {}) or {},
+    }
+
+
+def _render_review_counts(output_dir: str | Path) -> dict[str, Any]:
+    review_path = Path(output_dir) / "render_review.json"
+    if not review_path.exists():
+        return {"issue_count": 0, "issue_counts": {}}
+    review = _load_json(review_path)
+    return {
+        "path": review_path.as_posix(),
+        "status": review.get("status"),
+        "issue_count": review.get("issue_count", len(review.get("issues", []) or [])),
+        "issue_counts": review.get("issue_counts", {}) or {},
+        "pixel_similarity": review.get("pixel_similarity"),
+    }
+
+
 def _invalid_parent_hints(candidates: list[dict[str, Any]]) -> int:
     ids = {candidate.get("id") for candidate in candidates}
     layer_refs = {ref for candidate in candidates for ref in candidate.get("source_refs", []) if isinstance(ref, str) and ref.startswith("layer:")}
@@ -449,6 +526,9 @@ def _metrics_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         "avg_proposal_precision": metrics.get("avg_proposal_precision"),
         "avg_proposal_recall": metrics.get("avg_proposal_recall"),
         "avg_relation_f1": metrics.get("avg_relation_f1"),
+        "avg_relation_precision": metrics.get("avg_relation_precision"),
+        "avg_relation_recall": metrics.get("avg_relation_recall"),
+        "avg_component_group_f1": metrics.get("avg_component_group_f1"),
         "avg_human_accept_rate": metrics.get("avg_human_accept_rate"),
         "avg_quarantine_usefulness": metrics.get("avg_quarantine_usefulness"),
         "report": metrics.get("report"),
@@ -465,6 +545,8 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
     type_changes = sum(len(item.get("type_changes", []) or []) for item in items)
     type_guard_rejections = sum(item.get("type_guard_rejections", 0) or 0 for item in items)
     quarantined = sum(item.get("quarantined_proposals", 0) or 0 for item in items)
+    render_issues = sum(item.get("render_review_issue_count", 0) or 0 for item in items)
+    relation_count = sum(item.get("relation_count", 0) or 0 for item in items)
     semantic_gain = sum(
         max(0.0, item.get("role_fill_delta") or 0.0)
         + max(0.0, item.get("layout_fill_delta") or 0.0)
@@ -483,7 +565,11 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
     score += 10 * float(report.get("openai", {}).get("avg_type_f1") or 0.0)
     score += 10 * float(report.get("openai", {}).get("avg_proposal_recall") or 0.0)
     score += 5 * float(report.get("openai", {}).get("avg_relation_f1") or 0.0)
+    score += 5 * float(report.get("openai", {}).get("avg_component_group_f1") or 0.0)
+    score += min(8, quarantined * 0.5 + relation_count * 0.03)
     score -= type_changes
+    score -= render_issues * 0.5
+    curation_value_score = round(quarantined * 4 + render_issues * 5 + type_changes * 2 + relation_count * 0.02, 5)
     return {
         "prompt_version": prompt_version or report.get("prompt_version"),
         "policy": policy,
@@ -503,10 +589,16 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
         "avg_proposal_precision": report.get("openai", {}).get("avg_proposal_precision"),
         "avg_proposal_recall": report.get("openai", {}).get("avg_proposal_recall"),
         "avg_relation_f1": report.get("openai", {}).get("avg_relation_f1"),
+        "avg_relation_precision": report.get("openai", {}).get("avg_relation_precision"),
+        "avg_relation_recall": report.get("openai", {}).get("avg_relation_recall"),
+        "avg_component_group_f1": report.get("openai", {}).get("avg_component_group_f1"),
         "avg_quarantine_usefulness": report.get("openai", {}).get("avg_quarantine_usefulness"),
         "type_changes": type_changes,
         "type_guard_rejections": type_guard_rejections,
         "quarantined_proposals": quarantined,
+        "render_review_issue_count": render_issues,
+        "relation_count": relation_count,
+        "curation_value_score": curation_value_score,
     }
 
 
@@ -518,7 +610,10 @@ def _leaderboard_sort_key(entry: dict[str, Any]) -> tuple:
         bool(entry.get("golden_not_degraded")),
         float(entry.get("avg_type_f1") or 0.0),
         float(entry.get("avg_proposal_recall") or 0.0),
+        float(entry.get("avg_relation_f1") or 0.0),
+        float(entry.get("avg_component_group_f1") or 0.0),
         -int(entry.get("type_changes") or 0),
+        -int(entry.get("render_review_issue_count") or 0),
         float(entry.get("score") or 0),
     )
 
@@ -534,8 +629,8 @@ def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
         f"- model: {report.get('model')}",
         f"- prompt_version: {report.get('prompt_version')}",
         "",
-        "| prompt | policy | score | pixel | type F1 | proposal recall | gate | type changes | quarantined |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |",
+        "| prompt | policy | score | pixel | type F1 | relation F1 | proposal recall | gate | type changes | quarantined | render issues |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
     ]
     for run in report.get("runs", []) or []:
         gate = (
@@ -548,13 +643,14 @@ def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
         )
         lines.append(
             f"| {run.get('prompt_version')} | {run.get('policy')} | {run.get('score')} | {run.get('openai_pixel_similarity')} | "
-            f"{run.get('avg_type_f1')} | {run.get('avg_proposal_recall')} | {gate} | {run.get('type_changes')} | {run.get('quarantined_proposals')} |"
+            f"{run.get('avg_type_f1')} | {run.get('avg_relation_f1')} | {run.get('avg_proposal_recall')} | {gate} | "
+            f"{run.get('type_changes')} | {run.get('quarantined_proposals')} | {run.get('render_review_issue_count')} |"
         )
     (out_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _golden_not_degraded(baseline: dict[str, Any], openai: dict[str, Any]) -> bool:
-    for field in ("avg_type_f1", "avg_bbox_iou", "avg_proposal_recall", "avg_relation_f1"):
+    for field in ("avg_type_f1", "avg_bbox_iou", "avg_proposal_recall", "avg_relation_f1", "avg_component_group_f1"):
         base = baseline.get(field)
         refined = openai.get(field)
         if isinstance(base, (int, float)) and isinstance(refined, (int, float)) and refined + 1e-9 < base:
@@ -584,6 +680,9 @@ def _write_experiment_manifest(
         "vision_policy": policy,
         "document_kind": options.document_kind,
         "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+        "graph_overlay": options.graph_overlay,
+        "render_review": options.render_review,
+        "curation_report": options.curation_report,
         "api_key_env": provider.api_key_env,
         "api_key_present": bool(resolve_api_key(provider)),
         "base_url_present": bool(provider.base_url),
@@ -625,7 +724,9 @@ def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:
             f"document_kind={item.get('document_kind')}, "
             f"vision_created={vision.get('created_candidates', 0)}, "
             f"vision_quarantined={vision.get('quarantined_proposals', 0)}, "
-            f"semantic_rejected={semantic.get('rejected', 0)}"
+            f"semantic_rejected={semantic.get('rejected', 0)}, "
+            f"graph_edges={item.get('relation_count', 0)}, "
+            f"render_issues={item.get('render_review_issue_count', 0)}"
         )
     (out_dir / "regression_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

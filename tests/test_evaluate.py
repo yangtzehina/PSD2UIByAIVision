@@ -161,7 +161,10 @@ class EvaluateTests(unittest.TestCase):
             metrics = report["items"][0]["golden"]
             self.assertEqual(metrics["proposal_precision"], 1.0)
             self.assertEqual(metrics["proposal_recall"], 1.0)
+            self.assertEqual(metrics["relation_precision"], 1.0)
+            self.assertEqual(metrics["relation_recall"], 1.0)
             self.assertEqual(metrics["relation_f1"], 1.0)
+            self.assertEqual(metrics["component_group_f1"], 1.0)
             self.assertEqual(metrics["human_accept_rate"], 0.5)
             self.assertEqual(metrics["quarantine_usefulness"], 0.5)
 
