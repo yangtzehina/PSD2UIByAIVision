@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Boxes, FileJson, FileText, Image as ImageIcon, Layers, RotateCcw, Save, Upload } from "lucide-react";
+import { Boxes, BrainCircuit, Download, FileJson, FileText, Image as ImageIcon, KeyRound, Layers, Play, RotateCcw, Save, Upload } from "lucide-react";
 import "./styles.css";
 
 const nodeTypes = ["Screen", "Container", "Image", "Icon", "Text", "Button", "Input", "Toggle", "Slider", "ScrollView", "List", "Grid", "Background", "Unknown"];
@@ -22,15 +22,56 @@ const palette = {
   Unknown: "#f97316",
 };
 
+const semanticRules = [
+  "Do not invent pixel coordinates.",
+  "Return one item per useful candidate id when possible.",
+  "Prefer PSD layer text over OCR guesses.",
+  "Use Unknown for ambiguous decorative elements.",
+  "Use List/Grid/ScrollView only for repeated or scrollable regions.",
+  "style may be empty unless a supplied text style is clearly useful.",
+  "parent_candidate_id may be empty when uncertain.",
+  "component_group_id may be empty; use it only when multiple candidates should be wrapped into one UI component.",
+];
+
+const openAISemanticsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["candidate_id", "type", "confidence", "role", "text", "style", "layout", "parent_candidate_id", "component_group_id"],
+        properties: {
+          candidate_id: { type: "string" },
+          type: { type: "string", enum: nodeTypes },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          role: { type: "string" },
+          text: { type: "string" },
+          style: { type: "string" },
+          layout: { type: "string" },
+          parent_candidate_id: { type: "string" },
+          component_group_id: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
 function App() {
   const [imageUrl, setImageUrl] = useState("");
+  const [semanticImageDataUrl, setSemanticImageDataUrl] = useState("");
   const [uiir, setUiir] = useState(null);
   const [baselineUiir, setBaselineUiir] = useState(null);
   const [comparison, setComparison] = useState(null);
   const [candidates, setCandidates] = useState([]);
+  const [layers, setLayers] = useState([]);
   const [xml, setXml] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [corrections, setCorrections] = useState([]);
+  const [providerResult, setProviderResult] = useState(null);
   const [treeMode, setTreeMode] = useState("uiir");
   const nodes = useMemo(() => flattenNodes(uiir?.root), [uiir]);
   const psdTree = useMemo(() => buildPsdTree(nodes), [nodes]);
@@ -42,6 +83,27 @@ function App() {
   const selectedNode = nodes.find((item) => item.id === selectedId) || null;
   const selected = selectedCandidate || selectedNode;
   const selectedUsesCandidate = Boolean(selectedCandidate);
+
+  const loadDemo = () => {
+    const demo = createDemoData();
+    setImageUrl(demo.imageDataUrl);
+    setSemanticImageDataUrl(demo.imageDataUrl);
+    setUiir(demo.uiir);
+    setBaselineUiir(null);
+    setComparison(null);
+    setCandidates(demo.candidates);
+    setLayers(demo.layers);
+    setXml(demo.xml);
+    setCorrections([]);
+    setSelectedId("");
+    setProviderResult(null);
+  };
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("demo") === "1") {
+      loadDemo();
+    }
+  }, []);
 
   const upsertCorrection = (patch) => {
     if (!selected) return;
@@ -75,23 +137,36 @@ function App() {
           </div>
         </div>
 
-        <FileInput icon={<ImageIcon size={18} />} label="Composite PNG" accept="image/*" onFile={readImage(setImageUrl)} />
+        <FileInput icon={<ImageIcon size={18} />} label="Composite/Overlay PNG" accept="image/*" onFile={readImage(setImageUrl, setSemanticImageDataUrl)} />
         <FileInput icon={<FileJson size={18} />} label="uiir.json" accept=".json,application/json" onFile={readJson(setUiir)} />
         <FileInput icon={<FileJson size={18} />} label="baseline uiir.json" accept=".json,application/json" onFile={readJson(setBaselineUiir)} />
         <FileInput icon={<FileJson size={18} />} label="comparison.json" accept=".json,application/json" onFile={readJson(setComparison)} />
         <FileInput icon={<Boxes size={18} />} label="candidates.json" accept=".json,application/json" onFile={readJson(setCandidates)} />
+        <FileInput icon={<Layers size={18} />} label="layer_metadata.json" accept=".json,application/json" onFile={readLayers(setLayers)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
         <FileInput icon={<FileJson size={18} />} label="corrections.json" accept=".json,application/json" onFile={readCorrections(setCorrections)} />
+        <button className="demoButton" type="button" onClick={loadDemo}>
+          <BrainCircuit size={18} />
+          <span>Load demo sample</span>
+        </button>
 
         <section className="stats">
           <Metric label="Canvas" value={uiir ? `${uiir.width} x ${uiir.height}` : "Waiting"} />
           <Metric label="Nodes" value={nodes.length || "0"} />
           <Metric label="Boxes" value={boxes.length || "0"} />
+          <Metric label="Layers" value={layers.length || "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
           <Metric label="Diffs" value={Object.keys(diffByNodeId).length || "0"} />
         </section>
 
         <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} />
+        <ProviderSmokePanel
+          imageDataUrl={semanticImageDataUrl}
+          candidates={candidates}
+          layers={layers}
+          result={providerResult}
+          onResult={setProviderResult}
+        />
 
         <CorrectionEditor
           selected={selected}
@@ -177,6 +252,117 @@ function DiffPanel({ comparison, diffCount }) {
           </div>
         ))}
         {!comparison ? <Muted text="Load comparison.json" /> : null}
+      </div>
+    </section>
+  );
+}
+
+function ProviderSmokePanel({ imageDataUrl, candidates, layers, result, onResult }) {
+  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1");
+  const [token, setToken] = useState("");
+  const [model, setModel] = useState("gpt-5.5");
+  const [apiMode, setApiMode] = useState("responses");
+  const [detail, setDetail] = useState("original");
+  const [running, setRunning] = useState(false);
+  const ready = Boolean(imageDataUrl && candidates.length && token.trim() && model.trim() && baseUrl.trim());
+  const summary = result?.parsed ? summarizeSemanticItems(result.parsed.items || []) : null;
+
+  const runSmoke = async () => {
+    setRunning(true);
+    onResult(null);
+    try {
+      const next = await runProviderSemanticSmoke({
+        baseUrl,
+        token,
+        model,
+        apiMode,
+        detail,
+        imageDataUrl,
+        candidates,
+        layers,
+      });
+      onResult(next);
+    } catch (error) {
+      onResult({
+        ok: false,
+        error: friendlyProviderError(error),
+        provider: { baseUrl: normalizedBaseUrl(baseUrl), model, apiMode, detail },
+      });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <section className="providerPanel">
+      <header>
+        <span>Provider Smoke</span>
+        <BrainCircuit size={17} />
+      </header>
+      <div className="providerBody">
+        <div className="tokenNote">
+          <KeyRound size={15} />
+          <span>Token stays in this browser tab. It is never saved to the repository.</span>
+        </div>
+        <label>
+          <span>Base URL</span>
+          <input value={baseUrl} placeholder="https://api.openai.com/v1" onChange={(event) => setBaseUrl(event.target.value)} />
+        </label>
+        <label>
+          <span>Token</span>
+          <input type="password" value={token} autoComplete="off" placeholder="Provider API key" onChange={(event) => setToken(event.target.value)} />
+        </label>
+        <div className="providerGrid">
+          <label>
+            <span>Model</span>
+            <input value={model} onChange={(event) => setModel(event.target.value)} />
+          </label>
+          <label>
+            <span>API</span>
+            <select value={apiMode} onChange={(event) => setApiMode(event.target.value)}>
+              <option value="responses">responses</option>
+              <option value="chat-completions">chat</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span>Detail</span>
+          <select value={detail} onChange={(event) => setDetail(event.target.value)}>
+            <option value="original">original</option>
+            <option value="high">high</option>
+            <option value="low">low</option>
+            <option value="auto">auto</option>
+          </select>
+        </label>
+        <div className="providerActions">
+          <button type="button" onClick={runSmoke} disabled={!ready || running} title="Run provider semantic smoke">
+            <Play size={16} />
+            <span>{running ? "Running" : "Run"}</span>
+          </button>
+          <button type="button" onClick={() => setToken("")} disabled={!token} title="Clear token">
+            <KeyRound size={16} />
+          </button>
+          <button type="button" onClick={() => result && exportProviderResult(result)} disabled={!result} title="Download provider result">
+            <Download size={16} />
+          </button>
+        </div>
+        <div className="providerReadiness">
+          <span className={imageDataUrl ? "ok" : ""}>image</span>
+          <span className={candidates.length ? "ok" : ""}>{candidates.length || 0} candidates</span>
+          <span className={layers.length ? "ok" : ""}>{layers.length || 0} layers</span>
+        </div>
+        {result ? (
+          <div className={`providerResult ${result.ok ? "ok" : "failed"}`}>
+            <strong>{result.ok ? "OK" : "Failed"}</strong>
+            {result.error ? <span>{result.error}</span> : null}
+            {summary ? (
+              <>
+                <span>{summary.count} returned items</span>
+                <span>role {summary.roleFill}% · layout {summary.layoutFill}% · parent {summary.parentFill}%</span>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -477,12 +663,24 @@ function sortPsdTree(node) {
   node.children?.forEach(sortPsdTree);
 }
 
-function readImage(setter) {
-  return (file) => setter(URL.createObjectURL(file));
+function readImage(setter, dataSetter) {
+  return async (file) => {
+    setter(URL.createObjectURL(file));
+    if (dataSetter) {
+      dataSetter(await fileToDataUrl(file));
+    }
+  };
 }
 
 function readJson(setter) {
   return async (file) => setter(JSON.parse(await file.text()));
+}
+
+function readLayers(setter) {
+  return async (file) => {
+    const parsed = JSON.parse(await file.text());
+    setter(Array.isArray(parsed) ? parsed : parsed.layers || []);
+  };
 }
 
 function readCorrections(setter) {
@@ -496,6 +694,15 @@ function readText(setter) {
   return async (file) => setter(await file.text());
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 function exportCorrections(corrections) {
   const payload = JSON.stringify({ version: "0.1", corrections }, null, 2);
   const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
@@ -504,6 +711,356 @@ function exportCorrections(corrections) {
   anchor.download = "corrections.json";
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+async function runProviderSemanticSmoke({ baseUrl, token, model, apiMode, detail, imageDataUrl, candidates, layers }) {
+  const payload = {
+    task: "Classify PSD UI candidates and refine UI semantic hints.",
+    prompt_version: "browser_smoke",
+    rules: semanticRules,
+    candidates: candidates.slice(0, 220).map(candidateSummary),
+    layers: layers.slice(0, 260).map(layerSummary),
+  };
+  const prompt = [
+    "You are refining a PSD-to-UI intermediate representation.",
+    "The image has candidate boxes overlaid with ids.",
+    "Return semantic classifications that match the supplied JSON schema.",
+    "",
+    JSON.stringify(payload),
+  ].join("\n");
+  const endpoint = `${normalizedBaseUrl(baseUrl)}/${apiMode === "chat-completions" ? "chat/completions" : "responses"}`;
+  const requestBody = apiMode === "chat-completions"
+    ? chatCompletionsBody(model, prompt, imageDataUrl, detail)
+    : responsesBody(model, prompt, imageDataUrl, detail);
+  const started = performance.now();
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(requestBody),
+  });
+  const rawResponse = await response.text();
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${rawResponse.slice(0, 700)}`);
+  }
+  const responseJson = JSON.parse(rawResponse);
+  const rawText = responseText(responseJson);
+  const parsed = JSON.parse(rawText);
+  return {
+    ok: true,
+    seconds: Math.round(performance.now() - started) / 1000,
+    provider: {
+      baseUrl: normalizedBaseUrl(baseUrl),
+      model,
+      apiMode,
+      detail,
+      tokenPresent: true,
+    },
+    request: {
+      candidate_count: payload.candidates.length,
+      layer_count: payload.layers.length,
+      prompt_version: payload.prompt_version,
+      schema: "uiir_semantics",
+    },
+    parsed,
+    raw: rawText,
+  };
+}
+
+function responsesBody(model, prompt, imageDataUrl, detail) {
+  return {
+    model,
+    input: [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: prompt },
+          { type: "input_image", image_url: imageDataUrl, detail },
+        ],
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "uiir_semantics",
+        strict: true,
+        schema: openAISemanticsSchema,
+      },
+    },
+  };
+}
+
+function chatCompletionsBody(model, prompt, imageDataUrl, detail) {
+  return {
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: imageDataUrl, detail: detail === "original" ? "high" : detail } },
+        ],
+      },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "uiir_semantics",
+        strict: true,
+        schema: openAISemanticsSchema,
+      },
+    },
+  };
+}
+
+function candidateSummary(candidate) {
+  return {
+    id: candidate.id,
+    bbox: normalizeBox(candidate.bbox),
+    source: candidate.source || "",
+    type_hint: candidate.type_hint || candidate.type || "Unknown",
+    confidence: Number(candidate.confidence || 0),
+    name: candidate.name || candidate.metadata?.name || "",
+    text: candidate.text || "",
+    style: typeof candidate.style === "string" ? candidate.style : JSON.stringify(candidate.style || {}),
+    role: candidate.role || "",
+    asset: candidate.asset || "",
+    source_refs: candidate.source_refs || candidate.sourceRefs || [],
+  };
+}
+
+function layerSummary(layer) {
+  return {
+    id: layer.id,
+    name: layer.name || "",
+    path: layer.path || "",
+    kind: layer.kind || "",
+    bbox: normalizeBox(layer.bbox),
+    visible: layer.visible !== false,
+    is_group: Boolean(layer.is_group || layer.isGroup),
+    text: layer.text || "",
+    style: layer.style || {},
+  };
+}
+
+function responseText(responseJson) {
+  if (responseJson.output_text) return String(responseJson.output_text);
+  const outputChunks = [];
+  for (const output of responseJson.output || []) {
+    for (const content of output.content || []) {
+      if (content.text) outputChunks.push(content.text);
+    }
+  }
+  if (outputChunks.length) return outputChunks.join("");
+  const message = responseJson.choices?.[0]?.message;
+  if (typeof message?.content === "string") return message.content;
+  if (Array.isArray(message?.content)) {
+    return message.content.map((item) => item.text || "").join("");
+  }
+  throw new Error("Provider response did not contain text output.");
+}
+
+function summarizeSemanticItems(items) {
+  const count = items.length || 0;
+  if (!count) return { count: 0, roleFill: 0, layoutFill: 0, parentFill: 0 };
+  return {
+    count,
+    roleFill: Math.round((items.filter((item) => item.role).length / count) * 100),
+    layoutFill: Math.round((items.filter((item) => item.layout).length / count) * 100),
+    parentFill: Math.round((items.filter((item) => item.parent_candidate_id).length / count) * 100),
+  };
+}
+
+function friendlyProviderError(error) {
+  const message = error?.message || String(error);
+  if (message.includes("Failed to fetch")) {
+    return "Request blocked or unreachable. Check base URL, HTTPS, provider CORS, and network access.";
+  }
+  return message;
+}
+
+function normalizedBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function exportProviderResult(result) {
+  const payload = JSON.stringify({ ...result, provider: { ...result.provider, tokenPresent: Boolean(result.provider?.tokenPresent) } }, null, 2);
+  const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "provider-smoke-result.json";
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function createDemoData() {
+  const width = 420;
+  const height = 260;
+  const imageDataUrl = createDemoImage(width, height);
+  const candidates = [
+    {
+      id: "c1",
+      bbox: { x: 50, y: 36, w: 320, h: 178 },
+      source: "demo",
+      type_hint: "Container",
+      confidence: 0.82,
+      name: "Dialog",
+      source_refs: ["layer:1"],
+    },
+    {
+      id: "c2",
+      bbox: { x: 145, y: 155, w: 130, h: 44 },
+      source: "demo",
+      type_hint: "Button",
+      confidence: 0.76,
+      name: "confirm_btn_bg",
+      source_refs: ["layer:3"],
+    },
+    {
+      id: "c3",
+      bbox: { x: 174, y: 168, w: 72, h: 18 },
+      source: "demo",
+      type_hint: "Text",
+      confidence: 0.9,
+      text: "Confirm",
+      name: "confirm_text",
+      parent_hint: "c2",
+      source_refs: ["layer:4"],
+    },
+    {
+      id: "c4",
+      bbox: { x: 118, y: 70, w: 184, h: 28 },
+      source: "demo",
+      type_hint: "Text",
+      confidence: 0.88,
+      text: "Reward Unlocked",
+      name: "title",
+      parent_hint: "c1",
+      source_refs: ["layer:2"],
+    },
+  ];
+  const layers = [
+    { id: "layer:1", name: "dialog panel", path: "dialog panel", kind: "group", bbox: candidates[0].bbox, visible: true, is_group: true, text: "", style: {} },
+    { id: "layer:2", name: "title", path: "dialog panel/title", kind: "type", bbox: candidates[3].bbox, visible: true, is_group: false, text: "Reward Unlocked", style: { fontSize: 24 } },
+    { id: "layer:3", name: "confirm_btn_bg", path: "dialog panel/confirm_btn_bg", kind: "pixel", bbox: candidates[1].bbox, visible: true, is_group: false, text: "", style: {} },
+    { id: "layer:4", name: "confirm_text", path: "dialog panel/confirm_text", kind: "type", bbox: candidates[2].bbox, visible: true, is_group: false, text: "Confirm", style: { fontSize: 16 } },
+  ];
+  const uiir = {
+    version: "0.1",
+    source: "browser-demo",
+    width,
+    height,
+    assetsRoot: "assets/",
+    root: {
+      id: "n1",
+      type: "Screen",
+      bbox: { x: 0, y: 0, w: width, h: height },
+      confidence: 1,
+      sourceRefs: ["document"],
+      metadata: {},
+      children: [
+        {
+          id: "n2",
+          type: "Container",
+          bbox: candidates[0].bbox,
+          confidence: 0.82,
+          sourceRefs: ["layer:1"],
+          metadata: { psdPath: "dialog panel" },
+          children: [
+            { id: "n3", type: "Text", bbox: candidates[3].bbox, confidence: 0.88, sourceRefs: ["layer:2"], text: "Reward Unlocked", metadata: { psdPath: "dialog panel/title" }, children: [] },
+            {
+              id: "n4",
+              type: "Button",
+              bbox: { x: 145, y: 155, w: 130, h: 44 },
+              confidence: 0.78,
+              sourceRefs: ["layer:3", "layer:4"],
+              role: "primary_action",
+              metadata: { component: true, groupingReason: "demo_button_group" },
+              children: [
+                { id: "n5", type: "Background", bbox: candidates[1].bbox, confidence: 0.76, sourceRefs: ["layer:3"], metadata: { psdPath: "dialog panel/confirm_btn_bg" }, children: [] },
+                { id: "n6", type: "Text", bbox: candidates[2].bbox, confidence: 0.9, sourceRefs: ["layer:4"], text: "Confirm", metadata: { psdPath: "dialog panel/confirm_text" }, children: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const xml = [
+    '<UIIR version="0.1" source="browser-demo" width="420" height="260">',
+    '  <Assets root="assets/" />',
+    '  <Node id="n1" type="Screen" bbox="0,0,420,260" confidence="1.000" sourceRefs="document">',
+    '    <Node id="n2" type="Container" bbox="50,36,320,178" confidence="0.820" sourceRefs="layer:1">',
+    '      <Node id="n3" type="Text" bbox="118,70,184,28" confidence="0.880" sourceRefs="layer:2" text="Reward Unlocked" />',
+    '      <Node id="n4" type="Button" bbox="145,155,130,44" confidence="0.780" sourceRefs="layer:3 layer:4" role="primary_action" groupingReason="demo_button_group">',
+    '        <Node id="n5" type="Background" bbox="145,155,130,44" confidence="0.760" sourceRefs="layer:3" />',
+    '        <Node id="n6" type="Text" bbox="174,168,72,18" confidence="0.900" sourceRefs="layer:4" text="Confirm" />',
+    "      </Node>",
+    "    </Node>",
+    "  </Node>",
+    "</UIIR>",
+  ].join("\n");
+  return { imageDataUrl, candidates, layers, uiir, xml };
+}
+
+function createDemoImage(width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#eef1f5";
+  context.fillRect(0, 0, width, height);
+  context.fillStyle = "#ffffff";
+  roundRect(context, 50, 36, 320, 178, 12);
+  context.fill();
+  context.strokeStyle = "#d4dbe7";
+  context.lineWidth = 2;
+  roundRect(context, 50, 36, 320, 178, 12);
+  context.stroke();
+  context.fillStyle = "#172033";
+  context.font = "700 24px system-ui, sans-serif";
+  context.fillText("Reward Unlocked", 118, 92);
+  context.fillStyle = "#64748b";
+  context.font = "14px system-ui, sans-serif";
+  context.fillText("PSD layers can become UIIR components.", 91, 126);
+  context.fillStyle = "#14b8a6";
+  roundRect(context, 145, 155, 130, 44, 8);
+  context.fill();
+  context.fillStyle = "#ffffff";
+  context.font = "700 16px system-ui, sans-serif";
+  context.fillText("Confirm", 177, 183);
+  drawDemoBox(context, "c1", 50, 36, 320, 178, "#ef4444");
+  drawDemoBox(context, "c2", 145, 155, 130, 44, "#14b8a6");
+  drawDemoBox(context, "c3", 174, 168, 72, 18, "#2563eb");
+  drawDemoBox(context, "c4", 118, 70, 184, 28, "#2563eb");
+  return canvas.toDataURL("image/png");
+}
+
+function drawDemoBox(context, label, x, y, w, h, color) {
+  context.strokeStyle = color;
+  context.lineWidth = 2;
+  context.strokeRect(x, y, w, h);
+  context.fillStyle = color;
+  context.fillRect(x, Math.max(0, y - 18), 28, 18);
+  context.fillStyle = "#ffffff";
+  context.font = "700 11px system-ui, sans-serif";
+  context.fillText(label, x + 4, Math.max(13, y - 5));
+}
+
+function roundRect(context, x, y, w, h, radius) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + w - radius, y);
+  context.quadraticCurveTo(x + w, y, x + w, y + radius);
+  context.lineTo(x + w, y + h - radius);
+  context.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  context.lineTo(x + radius, y + h);
+  context.quadraticCurveTo(x, y + h, x, y + h - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
 }
 
 createRoot(document.getElementById("root")).render(<App />);

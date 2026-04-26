@@ -18,6 +18,11 @@ input {
   font: inherit;
 }
 
+input,
+select {
+  min-width: 0;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 320px 1fr;
@@ -28,6 +33,7 @@ input {
   background: #fbfcfd;
   border-right: 1px solid #d8dee8;
   padding: 24px;
+  min-width: 0;
   overflow: auto;
 }
 
@@ -54,6 +60,8 @@ input {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  min-width: 0;
   min-height: 44px;
   margin-bottom: 10px;
   padding: 0 12px;
@@ -63,8 +71,28 @@ input {
   cursor: pointer;
 }
 
+.fileInput span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .fileInput input {
   display: none;
+}
+
+.demoButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  margin-top: 2px;
+  border: 1px solid #172033;
+  border-radius: 8px;
+  background: #172033;
+  color: #fff;
+  cursor: pointer;
 }
 
 .stats {
@@ -74,9 +102,11 @@ input {
 }
 
 .metric {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 16px;
+  min-width: 0;
   padding: 12px;
   border: 1px solid #d4dbe7;
   border-radius: 8px;
@@ -87,6 +117,12 @@ input {
   color: #667085;
 }
 
+.metric strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .diffPanel {
   margin-top: 20px;
   border: 1px solid #d4dbe7;
@@ -94,11 +130,18 @@ input {
   background: #fff;
 }
 
-.diffPanel header {
+.diffPanel header,
+.providerPanel header {
   min-height: 42px;
   padding: 10px 12px;
   border-bottom: 1px solid #d4dbe7;
   font-weight: 800;
+}
+
+.providerPanel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .diffStats,
@@ -121,6 +164,146 @@ input {
 .diffItem span {
   color: #667085;
   font-size: 12px;
+}
+
+.providerPanel {
+  margin-top: 20px;
+  min-width: 0;
+  border: 1px solid #d4dbe7;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.providerBody {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.providerBody label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.providerBody label > span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.providerBody input,
+.providerBody select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #d4dbe7;
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  padding: 0 10px;
+}
+
+.providerGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 8px;
+}
+
+.tokenNote {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.tokenNote span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.providerActions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px 40px;
+  gap: 8px;
+}
+
+.providerActions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border: 1px solid #172033;
+  border-radius: 6px;
+  background: #172033;
+  color: #fff;
+  cursor: pointer;
+}
+
+.providerActions button:nth-child(n + 2) {
+  border-color: #d4dbe7;
+  background: #fff;
+  color: #172033;
+}
+
+.providerActions button:disabled {
+  border-color: #d4dbe7;
+  background: #eef1f5;
+  color: #98a2b3;
+  cursor: default;
+}
+
+.providerReadiness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.providerReadiness span {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #e4e7ec;
+  border-radius: 999px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.providerReadiness span.ok {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+}
+
+.providerResult {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.providerResult.ok {
+  border: 1px solid #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+}
+
+.providerResult.failed {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.providerResult span {
+  overflow-wrap: anywhere;
 }
 
 .editor {
@@ -247,6 +430,8 @@ input {
 
 .stage {
   overflow: auto;
+  min-width: 0;
+  max-width: 100vw;
   padding: 24px;
   background: #e4e8ef;
 }
@@ -430,6 +615,8 @@ input {
   }
 
   .sidebar {
+    width: 100vw;
+    max-width: 100vw;
     border-right: 0;
     border-bottom: 1px solid #d8dee8;
   }

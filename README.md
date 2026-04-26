@@ -185,6 +185,23 @@ npm run dev
 
 打开 Vite 提供的本地 URL，在页面中选择 CLI 输出文件即可检查 UI 树和候选框。
 
+## GitHub Pages 在线检查器
+
+仓库包含 GitHub Pages 自动部署 workflow。推送到 `main` 后，Inspector 会构建为静态页面：
+
+[https://yangtzehina.github.io/PSD2UIByAIVision/](https://yangtzehina.github.io/PSD2UIByAIVision/)
+
+在线页面可以直接上传本地 CLI 输出产物进行检查：
+
+- `overlay.png` 或 `composite.png`
+- `candidates.json`
+- `layer_metadata.json`
+- 可选 `uiir.json`、`uiir.xml`、`comparison.json`
+
+也可以点击 `Load demo sample` 直接加载一个内置小样例，再用 `Provider Smoke` 面板填写第三方 OpenAI-compatible `Base URL`、`Token`、`Model` 和 `API mode`，从浏览器直接调用 provider 做语义测试。Token 只存在当前浏览器标签页内，不写入仓库、不写入导出的结果文件。因为这是浏览器直连，第三方接口必须允许 CORS；如果 provider 不允许网页跨域请求，需要改用本地 CLI 的 `uiir compare-openai`。
+
+如果 GitHub Pages 没有自动出现，请在仓库 `Settings -> Pages` 中把 source 设为 `GitHub Actions`，然后重新运行 `Deploy Inspector to GitHub Pages` workflow。
+
 人工修正格式：
 
 ```json
