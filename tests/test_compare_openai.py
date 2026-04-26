@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from uiir.compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
+from uiir.compare_openai import CompareOptions, IterateOptions, _write_experiment_manifest, review_run, run_compare_openai, run_iterate_openai
+from uiir.provider import LLMProviderConfig
 
 
 class CompareOpenAITests(unittest.TestCase):
@@ -88,6 +89,41 @@ class CompareOpenAITests(unittest.TestCase):
         finally:
             if old_key is not None:
                 os.environ["OPENAI_API_KEY"] = old_key
+
+    def test_experiment_manifest_redacts_base_url_and_token(self):
+        old_key = os.environ.get("PROXY_API_KEY")
+        os.environ["PROXY_API_KEY"] = "placeholder-value"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                provider = LLMProviderConfig(
+                    provider_name="third-party",
+                    api_key_env="PROXY_API_KEY",
+                    base_url="https://gateway.example.test/v1",
+                    api_mode="chat-completions",
+                ).normalized()
+                _write_experiment_manifest(
+                    root,
+                    root,
+                    {"items": [{"source": "sample.psd"}]},
+                    IterateOptions(provider_name="third-party", api_key_env="PROXY_API_KEY", base_url="https://gateway.example.test/v1"),
+                    "semantic_v2",
+                    "strict",
+                    1.25,
+                    provider,
+                )
+
+                raw = (root / "experiment_manifest.json").read_text(encoding="utf-8")
+                manifest = json.loads(raw)
+                self.assertTrue(manifest["api_key_present"])
+                self.assertTrue(manifest["base_url_present"])
+                self.assertNotIn("placeholder-value", raw)
+                self.assertNotIn("https://gateway.example.test/v1", raw)
+        finally:
+            if old_key is None:
+                os.environ.pop("PROXY_API_KEY", None)
+            else:
+                os.environ["PROXY_API_KEY"] = old_key
 
 
 if __name__ == "__main__":

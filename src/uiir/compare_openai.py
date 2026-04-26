@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +37,7 @@ class CompareOptions:
     vision_adapter: str = "openai"
     vision_policy: str = "strict"
     document_kind: str = "auto"
+    golden_root: str | Path | None = None
 
 
 @dataclass
@@ -51,6 +54,9 @@ class IterateOptions:
     base_url: str | None = None
     api_mode: str = "responses"
     document_kind: str = "auto"
+    golden_root: str | Path | None = None
+    prompt_versions: tuple[str, ...] = ("semantic_v2",)
+    policies: tuple[str, ...] = ("audit", "strict", "balanced")
 
 
 def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: CompareOptions) -> dict[str, Any]:
@@ -79,6 +85,7 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
             "vision_adapter": options.vision_adapter,
             "vision_policy": options.vision_policy,
             "document_kind": options.document_kind,
+            "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
             "provider": provider_info,
             "created_at": _now(),
         }
@@ -96,8 +103,8 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
         baseline_items.append(_extract_one(psd_path, baseline_dir / slug, options, use_openai=False))
         openai_items.append(_extract_one(psd_path, openai_dir / slug, options, use_openai=True))
 
-    baseline_metrics = evaluate_outputs(baseline_dir, report_path=baseline_dir / "metrics.json")
-    openai_metrics = evaluate_outputs(openai_dir, report_path=openai_dir / "metrics.json")
+    baseline_metrics = evaluate_outputs(baseline_dir, golden_root=options.golden_root, report_path=baseline_dir / "metrics.json")
+    openai_metrics = evaluate_outputs(openai_dir, golden_root=options.golden_root, report_path=openai_dir / "metrics.json")
     comparisons = [_compare_pair(base, refined) for base, refined in zip(baseline_items, openai_items)]
     report = {
         "status": "ok",
@@ -110,6 +117,7 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
         "vision_adapter": options.vision_adapter,
         "vision_policy": options.vision_policy,
         "document_kind": options.document_kind,
+        "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
         "provider": provider_info,
         "input": Path(input_dir).expanduser().resolve().as_posix(),
         "output": out_dir.as_posix(),
@@ -140,6 +148,10 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
             "model": options.model,
             "detail": options.detail,
             "prompt_version": options.prompt_version,
+            "prompt_versions": list(options.prompt_versions),
+            "policies": list(options.policies),
+            "document_kind": options.document_kind,
+            "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
             "provider": provider_info,
             "created_at": _now(),
             "runs": [],
@@ -148,30 +160,38 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
         return report
 
     runs = []
-    for policy in ("audit", "strict", "balanced"):
-        run_dir = out_dir / f"{options.prompt_version}-{policy}"
-        report = run_compare_openai(
-            input_dir,
-            run_dir,
-            CompareOptions(
-                model=options.model,
-                detail=options.detail,
-                limit=options.limit,
-                prompt_version=options.prompt_version,
-                include_visual=options.include_visual,
-                include_ocr=options.include_ocr,
-                min_area=options.min_area,
-                provider_name=options.provider_name,
-                api_key_env=options.api_key_env,
-                base_url=options.base_url,
-                api_mode=options.api_mode,
-                openai_vision_proposals=True,
-                vision_adapter="openai",
-                vision_policy=policy,
-                document_kind=options.document_kind,
-            ),
-        )
-        runs.append(_leaderboard_entry(policy, run_dir, report))
+    for policy in options.policies:
+        if policy not in {"audit", "strict", "balanced"}:
+            raise ValueError(f"Unsupported vision policy {policy!r}; expected audit, strict, or balanced")
+    for prompt_version in options.prompt_versions:
+        for policy in options.policies:
+            run_dir = out_dir / f"{prompt_version}-{policy}"
+            started = time.perf_counter()
+            report = run_compare_openai(
+                input_dir,
+                run_dir,
+                CompareOptions(
+                    model=options.model,
+                    detail=options.detail,
+                    limit=options.limit,
+                    prompt_version=prompt_version,
+                    include_visual=options.include_visual,
+                    include_ocr=options.include_ocr,
+                    min_area=options.min_area,
+                    provider_name=options.provider_name,
+                    api_key_env=options.api_key_env,
+                    base_url=options.base_url,
+                    api_mode=options.api_mode,
+                    openai_vision_proposals=True,
+                    vision_adapter="openai",
+                    vision_policy=policy,
+                    document_kind=options.document_kind,
+                    golden_root=options.golden_root,
+                ),
+            )
+            seconds = round(time.perf_counter() - started, 3)
+            _write_experiment_manifest(run_dir, input_dir, report, options, prompt_version, policy, seconds, provider)
+            runs.append(_leaderboard_entry(policy, run_dir, report, prompt_version=prompt_version))
 
     runs = sorted(runs, key=_leaderboard_sort_key, reverse=True)
     report = {
@@ -180,7 +200,10 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
         "model": options.model,
         "detail": options.detail,
         "prompt_version": options.prompt_version,
+        "prompt_versions": list(options.prompt_versions),
+        "policies": list(options.policies),
         "document_kind": options.document_kind,
+        "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
         "provider": provider_info,
         "runs": runs,
     }
@@ -314,6 +337,8 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
         "type_guard_rejections": semantic_patch_counts.get("type_guard_rejections", 0),
         "vision": vision_counts,
         "quarantined_proposals": vision_counts.get("quarantined_proposals", 0),
+        "baseline_golden": baseline_visual.get("golden"),
+        "openai_golden": openai_visual.get("golden"),
     }
 
 
@@ -410,6 +435,7 @@ def _gates(baseline: dict[str, Any], openai: dict[str, Any], comparisons: list[d
             or (item.get("parent_hint_fill_delta") or 0) > 0
             for item in items
         ),
+        "golden_not_degraded": _golden_not_degraded(baseline, openai),
     }
 
 
@@ -418,6 +444,13 @@ def _metrics_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         "count": metrics.get("count"),
         "schema_ok": metrics.get("schema_ok"),
         "avg_pixel_similarity": metrics.get("avg_pixel_similarity"),
+        "avg_bbox_iou": metrics.get("avg_bbox_iou"),
+        "avg_type_f1": metrics.get("avg_type_f1"),
+        "avg_proposal_precision": metrics.get("avg_proposal_precision"),
+        "avg_proposal_recall": metrics.get("avg_proposal_recall"),
+        "avg_relation_f1": metrics.get("avg_relation_f1"),
+        "avg_human_accept_rate": metrics.get("avg_human_accept_rate"),
+        "avg_quarantine_usefulness": metrics.get("avg_quarantine_usefulness"),
         "report": metrics.get("report"),
     }
 
@@ -426,7 +459,7 @@ def _write_report(out_dir: Path, report: dict[str, Any]) -> None:
     (out_dir / "comparison.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any]) -> dict[str, Any]:
+def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], prompt_version: str | None = None) -> dict[str, Any]:
     items = report.get("items", []) or []
     gates = report.get("gates", {}) or {}
     type_changes = sum(len(item.get("type_changes", []) or []) for item in items)
@@ -446,8 +479,13 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any]) -> di
     score += 15 if gates.get("invalid_parent_hints_zero") else 0
     score += 15 if gates.get("unknown_not_increased") else 0
     score += 10 if gates.get("semantic_fill_positive") else 0
+    score += 15 if gates.get("golden_not_degraded") else 0
+    score += 10 * float(report.get("openai", {}).get("avg_type_f1") or 0.0)
+    score += 10 * float(report.get("openai", {}).get("avg_proposal_recall") or 0.0)
+    score += 5 * float(report.get("openai", {}).get("avg_relation_f1") or 0.0)
     score -= type_changes
     return {
+        "prompt_version": prompt_version or report.get("prompt_version"),
         "policy": policy,
         "status": report.get("status"),
         "run_dir": run_dir.as_posix(),
@@ -459,6 +497,13 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any]) -> di
         "invalid_parent_hints_zero": gates.get("invalid_parent_hints_zero"),
         "unknown_not_increased": gates.get("unknown_not_increased"),
         "semantic_fill_positive": gates.get("semantic_fill_positive"),
+        "golden_not_degraded": gates.get("golden_not_degraded"),
+        "avg_type_f1": report.get("openai", {}).get("avg_type_f1"),
+        "avg_bbox_iou": report.get("openai", {}).get("avg_bbox_iou"),
+        "avg_proposal_precision": report.get("openai", {}).get("avg_proposal_precision"),
+        "avg_proposal_recall": report.get("openai", {}).get("avg_proposal_recall"),
+        "avg_relation_f1": report.get("openai", {}).get("avg_relation_f1"),
+        "avg_quarantine_usefulness": report.get("openai", {}).get("avg_quarantine_usefulness"),
         "type_changes": type_changes,
         "type_guard_rejections": type_guard_rejections,
         "quarantined_proposals": quarantined,
@@ -470,6 +515,9 @@ def _leaderboard_sort_key(entry: dict[str, Any]) -> tuple:
         bool(entry.get("pixel_not_significantly_lower")),
         bool(entry.get("invalid_parent_hints_zero")),
         bool(entry.get("unknown_not_increased")),
+        bool(entry.get("golden_not_degraded")),
+        float(entry.get("avg_type_f1") or 0.0),
+        float(entry.get("avg_proposal_recall") or 0.0),
         -int(entry.get("type_changes") or 0),
         float(entry.get("score") or 0),
     )
@@ -486,16 +534,72 @@ def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
         f"- model: {report.get('model')}",
         f"- prompt_version: {report.get('prompt_version')}",
         "",
-        "| policy | score | pixel | gate | type changes | quarantined |",
-        "| --- | ---: | ---: | --- | ---: | ---: |",
+        "| prompt | policy | score | pixel | type F1 | proposal recall | gate | type changes | quarantined |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |",
     ]
     for run in report.get("runs", []) or []:
-        gate = "pass" if run.get("pixel_not_significantly_lower") and run.get("invalid_parent_hints_zero") and run.get("unknown_not_increased") else "review"
+        gate = (
+            "pass"
+            if run.get("pixel_not_significantly_lower")
+            and run.get("invalid_parent_hints_zero")
+            and run.get("unknown_not_increased")
+            and run.get("golden_not_degraded")
+            else "review"
+        )
         lines.append(
-            f"| {run.get('policy')} | {run.get('score')} | {run.get('openai_pixel_similarity')} | "
-            f"{gate} | {run.get('type_changes')} | {run.get('quarantined_proposals')} |"
+            f"| {run.get('prompt_version')} | {run.get('policy')} | {run.get('score')} | {run.get('openai_pixel_similarity')} | "
+            f"{run.get('avg_type_f1')} | {run.get('avg_proposal_recall')} | {gate} | {run.get('type_changes')} | {run.get('quarantined_proposals')} |"
         )
     (out_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _golden_not_degraded(baseline: dict[str, Any], openai: dict[str, Any]) -> bool:
+    for field in ("avg_type_f1", "avg_bbox_iou", "avg_proposal_recall", "avg_relation_f1"):
+        base = baseline.get(field)
+        refined = openai.get(field)
+        if isinstance(base, (int, float)) and isinstance(refined, (int, float)) and refined + 1e-9 < base:
+            return False
+    return True
+
+
+def _write_experiment_manifest(
+    run_dir: Path,
+    input_dir: str | Path,
+    report: dict[str, Any],
+    options: IterateOptions,
+    prompt_version: str,
+    policy: str,
+    seconds: float,
+    provider: LLMProviderConfig,
+) -> None:
+    manifest = {
+        "version": "0.1",
+        "created_at": _now(),
+        "git_sha": _git_sha(),
+        "input": Path(input_dir).expanduser().resolve().as_posix(),
+        "samples": [item.get("source") for item in report.get("items", []) or []],
+        "model": options.model,
+        "detail": options.detail,
+        "prompt_version": prompt_version,
+        "vision_policy": policy,
+        "document_kind": options.document_kind,
+        "golden": Path(options.golden_root).expanduser().resolve().as_posix() if options.golden_root else None,
+        "api_key_env": provider.api_key_env,
+        "api_key_present": bool(resolve_api_key(provider)),
+        "base_url_present": bool(provider.base_url),
+        "api_mode": provider.api_mode,
+        "seconds": seconds,
+        "estimated_cost": None,
+        "comparison": (run_dir / "comparison.json").as_posix(),
+    }
+    (run_dir / "experiment_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _git_sha() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return None
 
 
 def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:

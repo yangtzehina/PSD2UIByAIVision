@@ -169,6 +169,8 @@ uiir evaluate out/parser-smoke --golden goldens --report out/parser-smoke/metric
 
 评测会检查 UIIR JSON 基本 schema、生成 `preview.png`，并和 `composite.png` 计算像素相似度。提供 golden UIIR 时，还会输出类型 F1、bbox 平均 IoU 和树结构距离近似值。
 
+如果页面被自动识别为 `asset_sheet`，评测仍会生成 `replay_preview.png` 和 `diagnostic_overlay.png`，但不会把屏幕像素回放相似度作为主指标。素材表更关注元素拆分、类型、bbox、proposal 和 relation 指标。
+
 ## 基础回归与 OpenAI 语义回归
 
 基础回归不依赖网络模型，适合每次代码改动后运行：
@@ -222,6 +224,54 @@ uiir iterate-openai fixtures/openai-smoke --out out/runs/provider-vision \
 
 `iterate-openai` 会依次跑 `semantic_v2 + audit/strict/balanced`，输出 `leaderboard.json` 和 `leaderboard.md`，用 schema、pixel gate、invalid parent、Unknown、type changes、semantic fill 等指标排序。
 
+## Quarantine-to-Golden 闭环
+
+`strict` 策略会把无本地几何证据的新视觉提案写入 `vision_quarantined.json`。人工确认后，可以把这些隔离提案沉淀成本地 golden：
+
+```bash
+uiir golden build \
+  --psd fixtures/openai-smoke/opengameart-rpg-game-ui/interface.psd \
+  --run out/vision-smoke/openai/interface \
+  --decisions goldens/local/interface/golden_decisions.json \
+  --out goldens/local/interface
+```
+
+`golden_decisions.json` 由 Inspector 导出，格式如下：
+
+```json
+{
+  "version": "0.1",
+  "decisions": [
+    {
+      "decision": "accept",
+      "target_kind": "proposal",
+      "target_id": "p1",
+      "type": "Button",
+      "role": "primary_action"
+    }
+  ]
+}
+```
+
+支持的 `decision` 是 `accept|reject|edit|ignore`，支持的 `target_kind` 是 `proposal|candidate|node|relation`。接受的 quarantined proposal 会变成 `source="human-accepted-vision-proposal"`、`confidence=0.90` 的人工候选，并保留 `sourceRefs=["openai-vision:<proposal_id>"]`。`goldens/local/` 已在 `.gitignore` 中忽略，适合存本地人工标注和商业 PSD 样本。
+
+有 golden 后再跑自我迭代：
+
+```bash
+uiir iterate-openai fixtures/openai-smoke --out out/runs/provider-vision \
+  --provider-name third-party \
+  --api-key-env UIIR_PROVIDER_API_KEY \
+  --base-url "$UIIR_OPENAI_BASE_URL" \
+  --api-mode chat-completions \
+  --model gpt-5.5 \
+  --limit 2 \
+  --golden goldens/local \
+  --prompts semantic_v2,semantic_v3 \
+  --policies audit,strict,balanced
+```
+
+每个子 run 会写 `experiment_manifest.json`，只记录 `api_key_env`、`api_key_present` 和 `base_url_present`，不记录 token 或真实 base URL。`leaderboard` 会综合 schema、pixel gate、invalid parent、Unknown、type changes、golden F1、proposal recall、relation F1 和 quarantine usefulness 排序。
+
 第三方 provider 的 smoke 方式相同，只是把 key 环境变量和 base URL 换掉：
 
 ```bash
@@ -265,7 +315,7 @@ npm run dev
 
 也可以点击 `Load demo sample` 直接加载一个内置小样例，再用 `Provider Smoke` 面板填写第三方 OpenAI-compatible `Base URL`、`Token`、`Model` 和 `API mode`，从浏览器直接调用 provider 做语义测试。Token 只存在当前浏览器标签页内，不写入仓库、不写入导出的结果文件。因为这是浏览器直连，第三方接口必须允许 CORS；如果 provider 不允许网页跨域请求，需要改用本地 CLI 的 `uiir compare-openai`。
 
-检查器的 Review Filters 可以切换 `All / Local / GPT Accepted / GPT Quarantined / GPT Rejected / Semantic Patch`。选中节点时会显示视觉提案原因、隔离/拒绝原因、相关 candidate id 和语义补丁审计，方便把模型建议变成人工确认的 `corrections.json`。
+检查器的 Review Filters 可以切换 `All / Local / GPT Accepted / GPT Quarantined / GPT Rejected / Semantic Patch`。选中节点时会显示视觉提案原因、隔离/拒绝原因、相关 candidate id 和语义补丁审计。`Golden Decision` 面板支持 Accept / Reject / Edit / Ignore，并导出 `golden_decisions.json`；原 `corrections.json` 导出仍保留用于快速修正单次输出。
 
 如果 GitHub Pages 没有自动出现，请在仓库 `Settings -> Pages` 中把 source 设为 `GitHub Actions`，然后重新运行 `Deploy Inspector to GitHub Pages` workflow。
 

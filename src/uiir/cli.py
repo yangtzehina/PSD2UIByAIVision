@@ -9,6 +9,7 @@ from .batch import run_batch
 from .compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
 from .evaluate import evaluate_outputs
 from .fixtures import download_fixture_set, list_fixture_sets
+from .golden import build_golden_from_decisions
 from .pipeline import ExtractOptions, run_extract
 from .schema import UIIR_JSON_SCHEMA
 
@@ -61,6 +62,14 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--golden", help="Optional golden UIIR directory.")
     evaluate.add_argument("--report", help="Metrics report path. Defaults to <output>/metrics.json.")
 
+    golden = subparsers.add_parser("golden", help="Build local golden UIIR data from human review decisions.")
+    golden_subparsers = golden.add_subparsers(dest="golden_command", required=True)
+    golden_build = golden_subparsers.add_parser("build", help="Build a golden UIIR sample from a run and golden_decisions.json.")
+    golden_build.add_argument("--psd", required=True, help="Source PSD/PSB used for the run.")
+    golden_build.add_argument("--run", required=True, help="OpenAI sample output directory containing candidates.json and vision_quarantined.json.")
+    golden_build.add_argument("--decisions", required=True, help="golden_decisions.json exported from the inspector.")
+    golden_build.add_argument("--out", required=True, help="Output golden sample directory.")
+
     compare = subparsers.add_parser("compare-openai", help="Compare local baseline against GPT-5.5 semantic refinement.")
     compare.add_argument("input", help="Input PSD/PSB file or fixture directory.")
     compare.add_argument("--out", required=True, help="Output comparison directory.")
@@ -71,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_vision_args(compare)
     _add_document_args(compare)
     _add_provider_args(compare)
+    compare.add_argument("--golden", help="Optional golden UIIR directory for comparison metrics.")
     compare.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
     compare.add_argument("--min-area", type=int, default=96, help="Minimum candidate area in pixels.")
 
@@ -81,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     iterate.add_argument("--model", default="gpt-5.5", help="OpenAI model for semantic refinement.")
     iterate.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
     iterate.add_argument("--prompt-version", default="semantic_v2", help="Prompt/schema version identifier.")
+    iterate.add_argument("--prompts", help="Comma-separated prompt versions. Defaults to --prompt-version.")
+    iterate.add_argument("--policies", default="audit,strict,balanced", help="Comma-separated vision policies to compare.")
+    iterate.add_argument("--golden", help="Optional golden UIIR directory for leaderboard metrics.")
     _add_document_args(iterate)
     _add_provider_args(iterate)
     iterate.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
@@ -101,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         return _batch(args)
     if args.command == "evaluate":
         return _evaluate(args)
+    if args.command == "golden":
+        return _golden(args)
     if args.command == "compare-openai":
         return _compare_openai(args)
     if args.command == "iterate-openai":
@@ -168,6 +183,7 @@ def _compare_openai(args: argparse.Namespace) -> int:
         vision_adapter=args.vision_adapter,
         vision_policy=args.vision_policy,
         document_kind=args.document_kind,
+        golden_root=args.golden,
     )
     try:
         report = run_compare_openai(args.input, args.out, options)
@@ -200,6 +216,9 @@ def _iterate_openai(args: argparse.Namespace) -> int:
         base_url=args.base_url,
         api_mode=args.api_mode,
         document_kind=args.document_kind,
+        golden_root=args.golden,
+        prompt_versions=_parse_csv(args.prompts) or (args.prompt_version,),
+        policies=_parse_csv(args.policies) or ("audit", "strict", "balanced"),
     )
     try:
         report = run_iterate_openai(args.input, args.out, options)
@@ -226,6 +245,22 @@ def _review_run(args: argparse.Namespace) -> int:
     print(f"findings: {review['finding_count']}")
     print(f"review: {Path(args.run).expanduser().resolve() / 'review.md'}")
     return 0
+
+
+def _golden(args: argparse.Namespace) -> int:
+    if args.golden_command == "build":
+        try:
+            manifest = build_golden_from_decisions(args.psd, args.run, args.decisions, args.out)
+        except Exception as exc:
+            print(f"uiir golden build failed: {exc}", file=sys.stderr)
+            return 2
+        print("UIIR golden build complete")
+        print(f"output: {Path(args.out).expanduser().resolve()}")
+        print(f"uiir_json: {manifest['uiir_json']}")
+        print(f"uiir_xml: {manifest['uiir_xml']}")
+        print(f"manifest: {Path(args.out).expanduser().resolve() / 'manifest.json'}")
+        return 0
+    return 1
 
 
 def _fixtures(args: argparse.Namespace) -> int:
@@ -306,6 +341,12 @@ def _parse_bool(value) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError(f"Expected boolean, got {value!r}")
+
+
+def _parse_csv(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def _add_provider_args(parser: argparse.ArgumentParser) -> None:

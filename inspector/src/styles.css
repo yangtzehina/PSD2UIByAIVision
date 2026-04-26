@@ -327,14 +327,16 @@ select {
   overflow-wrap: anywhere;
 }
 
-.editor {
+.editor,
+.decisionPanel {
   margin-top: 20px;
   border: 1px solid #d4dbe7;
   border-radius: 8px;
   background: #fff;
 }
 
-.editor header {
+.editor header,
+.decisionPanel header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -343,6 +345,76 @@ select {
   padding: 10px 12px;
   border-bottom: 1px solid #d4dbe7;
   font-weight: 800;
+}
+
+.decisionPanel header button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #d4dbe7;
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  cursor: pointer;
+}
+
+.decisionPanel header button:disabled {
+  color: #98a2b3;
+  cursor: default;
+}
+
+.decisionTarget,
+.decisionStatus {
+  display: grid;
+  gap: 3px;
+  margin: 12px;
+  padding: 10px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.decisionTarget span,
+.decisionStatus span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.decisionTarget strong,
+.decisionStatus strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decisionActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.decisionActions button {
+  min-height: 34px;
+  border: 1px solid #172033;
+  border-radius: 6px;
+  background: #172033;
+  color: #fff;
+  cursor: pointer;
+}
+
+.decisionActions button:nth-child(n + 2) {
+  border-color: #d4dbe7;
+  background: #fff;
+  color: #172033;
+}
+
+.decisionActions button:disabled {
+  border-color: #d4dbe7;
+  background: #eef1f5;
+  color: #98a2b3;
+  cursor: default;
 }
 
 .editorActions {

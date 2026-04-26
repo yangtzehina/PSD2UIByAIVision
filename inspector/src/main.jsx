@@ -79,6 +79,7 @@ function App() {
   const [xml, setXml] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [corrections, setCorrections] = useState([]);
+  const [goldenDecisions, setGoldenDecisions] = useState([]);
   const [providerResult, setProviderResult] = useState(null);
   const [treeMode, setTreeMode] = useState("uiir");
   const [boxFilter, setBoxFilter] = useState("all");
@@ -97,6 +98,7 @@ function App() {
   const selectedNode = nodes.find((item) => item.id === selectedId) || null;
   const selected = selectedCandidate || selectedNode;
   const selectedUsesCandidate = Boolean(selectedCandidate);
+  const selectedGoldenDecision = selected ? getGoldenDecision(goldenDecisions, selected, selectedUsesCandidate) : null;
 
   const loadDemo = () => {
     const demo = createDemoData();
@@ -112,6 +114,7 @@ function App() {
     setSemanticPatches([]);
     setXml(demo.xml);
     setCorrections([]);
+    setGoldenDecisions([]);
     setSelectedId("");
     setProviderResult(null);
   };
@@ -143,6 +146,24 @@ function App() {
     setCorrections((items) => items.filter((item) => !sameTarget(item, identity)));
   };
 
+  const upsertGoldenDecision = (decision, includeEdits = false) => {
+    if (!selected) return;
+    const identity = decisionIdentityFor(selected, selectedUsesCandidate);
+    const correction = getCorrection(corrections, selected, selectedUsesCandidate);
+    const patch = includeEdits ? decisionOverrides(mergeTarget(selected, correction)) : {};
+    setGoldenDecisions((items) => {
+      const index = items.findIndex((item) => item.target_kind === identity.target_kind && item.target_id === identity.target_id);
+      const next = [...items];
+      const value = compactDecision({ ...identity, decision, ...patch });
+      if (index >= 0) {
+        next[index] = value;
+      } else {
+        next.push(value);
+      }
+      return next;
+    });
+  };
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -165,6 +186,7 @@ function App() {
         <FileInput icon={<FileJson size={18} />} label="semantic_patches.json" accept=".json,application/json" onFile={readJson(setSemanticPatches)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
         <FileInput icon={<FileJson size={18} />} label="corrections.json" accept=".json,application/json" onFile={readCorrections(setCorrections)} />
+        <FileInput icon={<FileJson size={18} />} label="golden_decisions.json" accept=".json,application/json" onFile={readGoldenDecisions(setGoldenDecisions)} />
         <button className="demoButton" type="button" onClick={loadDemo}>
           <BrainCircuit size={18} />
           <span>Load demo sample</span>
@@ -178,6 +200,7 @@ function App() {
           <Metric label="Quarantine" value={quarantinedBoxes.length || "0"} />
           <Metric label="Rejected" value={rejectedBoxes.length || "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
+          <Metric label="Decisions" value={goldenDecisions.length || "0"} />
           <Metric label="Diffs" value={Object.keys(diffByNodeId).length || "0"} />
         </section>
 
@@ -216,6 +239,14 @@ function App() {
           onReset={resetSelected}
           onExport={() => exportCorrections(corrections)}
           correctionCount={corrections.length}
+        />
+        <GoldenDecisionPanel
+          selected={selected}
+          usingCandidates={selectedUsesCandidate}
+          decision={selectedGoldenDecision}
+          onDecide={upsertGoldenDecision}
+          onExport={() => exportGoldenDecisions(goldenDecisions)}
+          decisionCount={goldenDecisions.length}
         />
       </aside>
 
@@ -494,6 +525,41 @@ function CorrectionEditor({ selected, usingCandidates, correction, onChange, onR
   );
 }
 
+function GoldenDecisionPanel({ selected, usingCandidates, decision, onDecide, onExport, decisionCount }) {
+  const canDecide = Boolean(selected);
+  const identity = selected ? decisionIdentityFor(selected, usingCandidates) : null;
+  return (
+    <section className="decisionPanel">
+      <header>
+        <span>Golden Decision</span>
+        <button type="button" onClick={onExport} disabled={!decisionCount} title="Export golden_decisions.json">
+          <Save size={16} />
+        </button>
+      </header>
+      {selected ? (
+        <>
+          <div className="decisionTarget">
+            <span>{identity.target_kind}</span>
+            <strong>{identity.target_id}</strong>
+          </div>
+          <div className="decisionActions">
+            <button type="button" onClick={() => onDecide("accept")} disabled={!canDecide}>Accept</button>
+            <button type="button" onClick={() => onDecide("reject")} disabled={!canDecide}>Reject</button>
+            <button type="button" onClick={() => onDecide("edit", true)} disabled={!canDecide}>Edit</button>
+            <button type="button" onClick={() => onDecide("ignore")} disabled={!canDecide}>Ignore</button>
+          </div>
+          <div className="decisionStatus">
+            <span>Current</span>
+            <strong>{decision?.decision || "none"}</strong>
+          </div>
+        </>
+      ) : (
+        <Muted text="Select a quarantined proposal or node" />
+      )}
+    </section>
+  );
+}
+
 function NodeDetails({ node }) {
   const metadata = node.metadata || {};
   const refs = node.sourceRefs || node.source_refs || [];
@@ -529,6 +595,10 @@ function NodeDetails({ node }) {
       <div>
         <span>Semantic</span>
         <strong>{semanticPatches.length ? `${semanticPatches.length} patch` : "n/a"}</strong>
+      </div>
+      <div>
+        <span>Decision</span>
+        <strong>{metadata.goldenDecision?.decision || "n/a"}</strong>
       </div>
     </div>
   );
@@ -631,10 +701,33 @@ function sameTarget(left, right) {
   return (left.candidate_id && left.candidate_id === right.candidate_id) || (left.node_id && left.node_id === right.node_id);
 }
 
+function sameDecisionTarget(left, right) {
+  return left.target_kind === right.target_kind && left.target_id === right.target_id;
+}
+
 function getCorrection(corrections, target, usingCandidates) {
   if (!target) return null;
   const key = usingCandidates ? "candidate_id" : "node_id";
   return corrections.find((item) => item[key] === target.id) || null;
+}
+
+function getGoldenDecision(decisions, target, usingCandidates) {
+  if (!target) return null;
+  const identity = decisionIdentityFor(target, usingCandidates);
+  return decisions.find((item) => sameDecisionTarget(item, identity)) || null;
+}
+
+function decisionIdentityFor(target, usingCandidates) {
+  const source = String(target.source || "");
+  if (source.includes("openai-vision-quarantined") || source.includes("openai-vision-rejected")) {
+    return { target_kind: "proposal", target_id: target.proposal_id || stripTargetPrefix(target.id) };
+  }
+  return usingCandidates ? { target_kind: "candidate", target_id: target.id } : { target_kind: "node", target_id: target.id };
+}
+
+function stripTargetPrefix(value) {
+  const text = String(value || "");
+  return text.includes(":") ? text.split(":").pop() : text;
 }
 
 function mergeTarget(target, correction) {
@@ -653,6 +746,25 @@ function mergeTarget(target, correction) {
     ignored: false,
     ...correction,
   };
+}
+
+function decisionOverrides(target) {
+  const fields = {};
+  for (const key of ["bbox", "type", "role", "text", "style", "layout", "parent_id"]) {
+    if (target[key] !== "" && target[key] !== null && target[key] !== undefined) {
+      fields[key] = target[key];
+    }
+  }
+  return fields;
+}
+
+function compactDecision(item) {
+  const compacted = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (value === "" || value === null || value === undefined) continue;
+    compacted[key] = value;
+  }
+  return compacted;
 }
 
 function compactCorrection(item) {
@@ -719,6 +831,8 @@ function proposalBoxes(proposals, source) {
     const proposalId = item.proposal_id || `r${index + 1}`;
     return {
       id: `${source}:${proposalId}`,
+      proposal_id: proposalId,
+      target_kind: "proposal",
       type_hint: item.type || "Unknown",
       bbox: item.bbox,
       source,
@@ -729,6 +843,7 @@ function proposalBoxes(proposals, source) {
         rejectionReason: item.rejectionReason || item.rejection_reason || "",
         quarantineReason: item.quarantineReason || item.quarantine_reason || "",
         proposalReason: item.reason || "",
+        goldenDecision: item.goldenDecision || null,
         relatedCandidateIds: item.related_candidate_ids || [],
       },
     };
@@ -818,6 +933,13 @@ function readCorrections(setter) {
   };
 }
 
+function readGoldenDecisions(setter) {
+  return async (file) => {
+    const parsed = JSON.parse(await file.text());
+    setter(Array.isArray(parsed) ? parsed : parsed.decisions || []);
+  };
+}
+
 function readText(setter) {
   return async (file) => setter(await file.text());
 }
@@ -837,6 +959,16 @@ function exportCorrections(corrections) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = "corrections.json";
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportGoldenDecisions(decisions) {
+  const payload = JSON.stringify({ version: "0.1", decisions }, null, 2);
+  const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "golden_decisions.json";
   anchor.click();
   URL.revokeObjectURL(url);
 }
