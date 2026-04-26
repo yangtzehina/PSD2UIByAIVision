@@ -107,17 +107,24 @@ def _validate_node(node: dict[str, Any], errors: list[str], path: str) -> None:
 def _visual_metrics(output_dir: Path, uiir_path: Path) -> dict[str, Any]:
     composite = output_dir / "composite.png"
     preview = output_dir / "preview.png"
+    replay_preview = output_dir / "replay_preview.png"
+    diagnostic_overlay = output_dir / "diagnostic_overlay.png"
     result: dict[str, Any] = {}
     try:
-        render_uiir_preview(uiir_path, preview)
+        render_uiir_preview(uiir_path, replay_preview, mode="replay")
+        render_uiir_preview(uiir_path, preview, mode="replay")
+        render_uiir_preview(uiir_path, diagnostic_overlay, mode="diagnostic")
         result["preview"] = preview.as_posix()
+        result["replay_preview"] = replay_preview.as_posix()
+        result["diagnostic_overlay"] = diagnostic_overlay.as_posix()
     except Exception as exc:
         result["preview_error"] = str(exc)
         return result
     if not composite.exists():
         return result
     try:
-        result["pixel_similarity"] = round(_pixel_similarity(composite, preview), 5)
+        result["render_pixel_similarity"] = round(_pixel_similarity(composite, replay_preview), 5)
+        result["pixel_similarity"] = result["render_pixel_similarity"]
     except Exception as exc:
         result["pixel_error"] = str(exc)
     return result

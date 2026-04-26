@@ -7,7 +7,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 
-def render_uiir_preview(uiir_json: str | Path, output_path: str | Path) -> Path:
+def render_uiir_preview(uiir_json: str | Path, output_path: str | Path, mode: str = "replay") -> Path:
     uiir_path = Path(uiir_json)
     data = json.loads(uiir_path.read_text(encoding="utf-8"))
     width = int(data["width"])
@@ -15,20 +15,20 @@ def render_uiir_preview(uiir_json: str | Path, output_path: str | Path) -> Path:
     base_dir = uiir_path.parent
     canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas, "RGBA")
-    _render_node(data.get("root", {}), canvas, draw, base_dir)
+    _render_node(data.get("root", {}), canvas, draw, base_dir, mode)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output)
     return output
 
 
-def _render_node(node: dict[str, Any], canvas: Image.Image, draw: ImageDraw.ImageDraw, base_dir: Path) -> None:
-    _render_single_node(node, canvas, draw, base_dir)
+def _render_node(node: dict[str, Any], canvas: Image.Image, draw: ImageDraw.ImageDraw, base_dir: Path, mode: str) -> None:
+    _render_single_node(node, canvas, draw, base_dir, mode)
     for child in node.get("children", []) or []:
-        _render_node(child, canvas, draw, base_dir)
+        _render_node(child, canvas, draw, base_dir, mode)
 
 
-def _render_single_node(node: dict[str, Any], canvas: Image.Image, draw: ImageDraw.ImageDraw, base_dir: Path) -> None:
+def _render_single_node(node: dict[str, Any], canvas: Image.Image, draw: ImageDraw.ImageDraw, base_dir: Path, mode: str) -> None:
     if node.get("type") == "Screen" or node.get("metadata", {}).get("component"):
         return
     bbox = node.get("bbox") or {}
@@ -51,6 +51,8 @@ def _render_single_node(node: dict[str, Any], canvas: Image.Image, draw: ImageDr
                 return
             except Exception:
                 pass
+    if mode == "replay":
+        return
 
     color = _color_for_type(str(node.get("type") or "Unknown"))
     draw.rectangle((x, y, x + w, y + h), outline=color, fill=(*color[:3], 28), width=2)

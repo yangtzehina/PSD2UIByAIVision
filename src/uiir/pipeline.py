@@ -6,7 +6,9 @@ from pathlib import Path
 
 from .corrections import apply_candidate_corrections, load_corrections
 from .detect import detect_candidates, infer_uiir_document
+from .document_kind import resolve_document_kind
 from .openai_semantics import refine_candidates_with_openai
+from .openai_vision import add_openai_vision_proposals
 from .overlay import draw_overlay
 from .provider import LLMProviderConfig
 from .psd import extract_psd
@@ -23,11 +25,15 @@ class ExtractOptions:
     detail: str = "original"
     corrections: str | Path | None = None
     openai_audit: bool = False
-    prompt_version: str = "semantic_v1"
+    prompt_version: str = "semantic_v2"
     provider_name: str = "openai"
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
     api_mode: str = "responses"
+    openai_vision_proposals: bool = False
+    vision_adapter: str = "openai"
+    vision_policy: str = "strict"
+    document_kind: str = "auto"
 
 
 @dataclass
@@ -45,6 +51,7 @@ def run_extract(psd_path: str | Path, output_dir: str | Path, options: ExtractOp
     out_dir = Path(output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     extract = extract_psd(psd_path, out_dir)
+    document_kind = resolve_document_kind(options.document_kind, extract.source, extract.layers)
     candidates = detect_candidates(
         extract,
         include_visual=options.include_visual,
@@ -52,6 +59,32 @@ def run_extract(psd_path: str | Path, output_dir: str | Path, options: ExtractOp
         min_area=options.min_area,
     )
     overlay = draw_overlay(extract.composite_path, candidates, out_dir / "overlay.png")
+    provider = LLMProviderConfig(
+        provider_name=options.provider_name,
+        api_key_env=options.api_key_env,
+        base_url=options.base_url,
+        api_mode=options.api_mode,
+    )
+
+    if options.openai_vision_proposals:
+        candidates = add_openai_vision_proposals(
+            candidates=candidates,
+            layers=extract.layers,
+            composite_path=extract.composite_path,
+            overlay_path=overlay,
+            width=extract.width,
+            height=extract.height,
+            min_area=options.min_area,
+            model=options.model,
+            detail=options.detail,
+            audit_dir=out_dir,
+            prompt_version="vision_v1",
+            provider=provider,
+            vision_adapter=options.vision_adapter,
+            vision_policy=options.vision_policy,
+            document_kind=document_kind,
+        )
+        overlay = draw_overlay(extract.composite_path, candidates, out_dir / "overlay.png")
 
     if options.use_openai:
         candidates = refine_candidates_with_openai(
@@ -62,12 +95,7 @@ def run_extract(psd_path: str | Path, output_dir: str | Path, options: ExtractOp
             detail=options.detail,
             audit_dir=out_dir if options.openai_audit else None,
             prompt_version=options.prompt_version,
-            provider=LLMProviderConfig(
-                provider_name=options.provider_name,
-                api_key_env=options.api_key_env,
-                base_url=options.base_url,
-                api_mode=options.api_mode,
-            ),
+            provider=provider,
         )
         overlay = draw_overlay(extract.composite_path, candidates, out_dir / "overlay.png")
 
@@ -78,6 +106,9 @@ def run_extract(psd_path: str | Path, output_dir: str | Path, options: ExtractOp
 
     document = infer_uiir_document(extract, candidates)
     document.metadata["corrections"] = correction_summary.to_dict()
+    document.metadata["documentKind"] = document_kind
+    document.metadata["requestedDocumentKind"] = options.document_kind
+    document.metadata["visionPolicy"] = options.vision_policy
     candidates_json = out_dir / "candidates.json"
     candidates_json.write_text(
         json.dumps([candidate.to_dict() for candidate in candidates], ensure_ascii=False, indent=2),

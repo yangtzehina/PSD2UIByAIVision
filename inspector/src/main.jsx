@@ -26,6 +26,11 @@ const semanticRules = [
   "Do not invent pixel coordinates.",
   "Return one item per useful candidate id when possible.",
   "Prefer PSD layer text over OCR guesses.",
+  "Do not return Screen for candidates; Screen is a synthetic root created by the program.",
+  "Do not downgrade a concrete local type to Unknown unless the local type is already Unknown.",
+  "Do not reclassify local Text candidates as Image, Container, or decorative controls.",
+  "Do not switch high-confidence concrete candidates across type families.",
+  "Only change Container into Button/Input/Toggle/Slider when component_group_id evidence is present.",
   "Use Unknown for ambiguous decorative elements.",
   "Use List/Grid/ScrollView only for repeated or scrollable regions.",
   "style may be empty unless a supplied text style is clearly useful.",
@@ -68,18 +73,27 @@ function App() {
   const [comparison, setComparison] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [layers, setLayers] = useState([]);
+  const [visionQuarantined, setVisionQuarantined] = useState([]);
+  const [visionRejected, setVisionRejected] = useState([]);
+  const [semanticPatches, setSemanticPatches] = useState([]);
   const [xml, setXml] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [corrections, setCorrections] = useState([]);
   const [providerResult, setProviderResult] = useState(null);
   const [treeMode, setTreeMode] = useState("uiir");
+  const [boxFilter, setBoxFilter] = useState("all");
   const nodes = useMemo(() => flattenNodes(uiir?.root), [uiir]);
   const psdTree = useMemo(() => buildPsdTree(nodes), [nodes]);
   const baselineNodes = useMemo(() => flattenNodes(baselineUiir?.root), [baselineUiir]);
   const diffByNodeId = useMemo(() => buildNodeDiffs(baselineNodes, nodes), [baselineNodes, nodes]);
-  const usingCandidates = candidates.length > 0;
-  const boxes = usingCandidates ? candidates : nodes;
-  const selectedCandidate = candidates.find((item) => item.id === selectedId) || null;
+  const semanticPatchByCandidate = useMemo(() => groupSemanticPatches(semanticPatches), [semanticPatches]);
+  const enrichedCandidates = useMemo(() => enrichCandidates(candidates, semanticPatchByCandidate), [candidates, semanticPatchByCandidate]);
+  const rejectedBoxes = useMemo(() => rejectedProposalBoxes(visionRejected), [visionRejected]);
+  const quarantinedBoxes = useMemo(() => proposalBoxes(visionQuarantined, "openai-vision-quarantined"), [visionQuarantined]);
+  const usingCandidates = enrichedCandidates.length > 0;
+  const sourceBoxes = usingCandidates ? enrichedCandidates : nodes;
+  const boxes = useMemo(() => filterReviewBoxes(sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter), [sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter]);
+  const selectedCandidate = boxes.find((item) => item.id === selectedId) || null;
   const selectedNode = nodes.find((item) => item.id === selectedId) || null;
   const selected = selectedCandidate || selectedNode;
   const selectedUsesCandidate = Boolean(selectedCandidate);
@@ -93,6 +107,9 @@ function App() {
     setComparison(null);
     setCandidates(demo.candidates);
     setLayers(demo.layers);
+    setVisionQuarantined([]);
+    setVisionRejected([]);
+    setSemanticPatches([]);
     setXml(demo.xml);
     setCorrections([]);
     setSelectedId("");
@@ -143,6 +160,9 @@ function App() {
         <FileInput icon={<FileJson size={18} />} label="comparison.json" accept=".json,application/json" onFile={readJson(setComparison)} />
         <FileInput icon={<Boxes size={18} />} label="candidates.json" accept=".json,application/json" onFile={readJson(setCandidates)} />
         <FileInput icon={<Layers size={18} />} label="layer_metadata.json" accept=".json,application/json" onFile={readLayers(setLayers)} />
+        <FileInput icon={<FileJson size={18} />} label="vision_quarantined.json" accept=".json,application/json" onFile={readJson(setVisionQuarantined)} />
+        <FileInput icon={<FileJson size={18} />} label="vision_rejected.json" accept=".json,application/json" onFile={readJson(setVisionRejected)} />
+        <FileInput icon={<FileJson size={18} />} label="semantic_patches.json" accept=".json,application/json" onFile={readJson(setSemanticPatches)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
         <FileInput icon={<FileJson size={18} />} label="corrections.json" accept=".json,application/json" onFile={readCorrections(setCorrections)} />
         <button className="demoButton" type="button" onClick={loadDemo}>
@@ -155,8 +175,28 @@ function App() {
           <Metric label="Nodes" value={nodes.length || "0"} />
           <Metric label="Boxes" value={boxes.length || "0"} />
           <Metric label="Layers" value={layers.length || "0"} />
+          <Metric label="Quarantine" value={quarantinedBoxes.length || "0"} />
+          <Metric label="Rejected" value={rejectedBoxes.length || "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
           <Metric label="Diffs" value={Object.keys(diffByNodeId).length || "0"} />
+        </section>
+
+        <section className="reviewFilters">
+          <header>Review Filter</header>
+          <div className="segmented vertical">
+            {[
+              ["all", "All"],
+              ["local", "Local"],
+              ["accepted", "GPT Accepted"],
+              ["quarantined", "GPT Quarantined"],
+              ["rejected", "GPT Rejected"],
+              ["semantic", "Semantic Patch"],
+            ].map(([value, label]) => (
+              <button key={value} className={boxFilter === value ? "active" : ""} type="button" onClick={() => setBoxFilter(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
         </section>
 
         <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} />
@@ -457,6 +497,9 @@ function CorrectionEditor({ selected, usingCandidates, correction, onChange, onR
 function NodeDetails({ node }) {
   const metadata = node.metadata || {};
   const refs = node.sourceRefs || node.source_refs || [];
+  const rejected = metadata.openaiRejected || [];
+  const semanticPatches = metadata.openaiSemanticPatches || metadata.externalSemanticPatches || [];
+  const related = metadata.relatedCandidateIds || metadata.related_candidate_ids || [];
   return (
     <div className="nodeDetails">
       <div>
@@ -470,6 +513,22 @@ function NodeDetails({ node }) {
       <div>
         <span>Grouping</span>
         <strong>{metadata.groupingReason || (metadata.component ? "component" : "n/a")}</strong>
+      </div>
+      <div>
+        <span>Proposal</span>
+        <strong>{metadata.proposalReason || metadata.openaiVisionProposal?.reason || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Rejected</span>
+        <strong>{metadata.rejectionReason || metadata.quarantineReason || rejected.map((item) => item.reason).filter(Boolean).join(", ") || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Related</span>
+        <strong>{related.join(", ") || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Semantic</span>
+        <strong>{semanticPatches.length ? `${semanticPatches.length} patch` : "n/a"}</strong>
       </div>
     </div>
   );
@@ -626,6 +685,75 @@ function flattenNodes(root) {
   return result;
 }
 
+function groupSemanticPatches(patches) {
+  const grouped = {};
+  const items = Array.isArray(patches) ? patches : patches?.items || patches?.patches || [];
+  for (const patch of items) {
+    if (!patch?.candidate_id) continue;
+    grouped[patch.candidate_id] = [...(grouped[patch.candidate_id] || []), patch];
+  }
+  return grouped;
+}
+
+function enrichCandidates(candidates, semanticPatchByCandidate) {
+  return candidates.map((candidate) => {
+    const externalSemanticPatches = semanticPatchByCandidate[candidate.id] || [];
+    if (!externalSemanticPatches.length) return candidate;
+    return {
+      ...candidate,
+      metadata: {
+        ...(candidate.metadata || {}),
+        externalSemanticPatches,
+      },
+    };
+  });
+}
+
+function rejectedProposalBoxes(rejected) {
+  return proposalBoxes(rejected, "openai-vision-rejected");
+}
+
+function proposalBoxes(proposals, source) {
+  const items = Array.isArray(proposals) ? proposals : proposals?.items || [];
+  return items.map((item, index) => {
+    const proposalId = item.proposal_id || `r${index + 1}`;
+    return {
+      id: `${source}:${proposalId}`,
+      type_hint: item.type || "Unknown",
+      bbox: item.bbox,
+      source,
+      source_refs: [`${source}:${proposalId}`],
+      role: item.role || "",
+      text: item.text || "",
+      metadata: {
+        rejectionReason: item.rejectionReason || item.rejection_reason || "",
+        quarantineReason: item.quarantineReason || item.quarantine_reason || "",
+        proposalReason: item.reason || "",
+        relatedCandidateIds: item.related_candidate_ids || [],
+      },
+    };
+  });
+}
+
+function filterReviewBoxes(sourceBoxes, rejectedBoxes, quarantinedBoxes, filter) {
+  if (filter === "rejected") return rejectedBoxes;
+  if (filter === "quarantined") return quarantinedBoxes;
+  if (filter === "local") return sourceBoxes.filter((box) => !isGptAcceptedBox(box) && !hasSemanticPatch(box));
+  if (filter === "accepted") return sourceBoxes.filter(isGptAcceptedBox);
+  if (filter === "semantic") return sourceBoxes.filter(hasSemanticPatch);
+  return sourceBoxes;
+}
+
+function isGptAcceptedBox(box) {
+  const metadata = box.metadata || {};
+  return box.source === "openai-vision-proposal" || Boolean(metadata.openaiVision?.accepted) || Boolean(metadata.openaiVisionProposals?.length);
+}
+
+function hasSemanticPatch(box) {
+  const metadata = box.metadata || {};
+  return Boolean(metadata.openaiSemanticPatches?.length || metadata.externalSemanticPatches?.length || metadata.openaiRejected?.length);
+}
+
 function buildPsdTree(nodes) {
   const root = {
     id: "psd-root",
@@ -716,7 +844,7 @@ function exportCorrections(corrections) {
 async function runProviderSemanticSmoke({ baseUrl, token, model, apiMode, detail, imageDataUrl, candidates, layers }) {
   const payload = {
     task: "Classify PSD UI candidates and refine UI semantic hints.",
-    prompt_version: "browser_smoke",
+    prompt_version: "semantic_v2_browser_smoke",
     rules: semanticRules,
     candidates: candidates.slice(0, 220).map(candidateSummary),
     layers: layers.slice(0, 260).map(layerSummary),

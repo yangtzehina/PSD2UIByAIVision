@@ -7,7 +7,7 @@
 - 坐标和素材来自本地 PSD 解析，不让模型猜像素。
 - UIIR 会在 PSD 图层树上提升运行时组件，例如把 `按钮背景 + 按钮文字` 合成一个 `Button`，原始图层仍作为子节点保留。
 - 本地视觉候选框补足不规范命名或简化图层。
-- GPT-5.5 只做语义归类、角色判断、层级修正，且默认不启用。
+- GPT-5.5 默认不启用；启用后可以先提出视觉漏检候选，再做语义归类、角色判断和层级修正。
 - 云端请求只发送合成图、编号候选框和必要元数据，不上传 PSD 原文件。
 
 ## 安装
@@ -55,6 +55,38 @@ uiir extract path/to/input.psd --out out/input --use-openai --model gpt-5.5
 ```
 
 `--use-openai` 会发送 `overlay.png`、候选框摘要、图层元数据摘要；不会发送 PSD 原文件。
+
+启用 GPT-5.5 真视觉提案：
+
+```bash
+uiir extract path/to/input.psd --out out/input --use-openai \
+  --model gpt-5.5 \
+  --openai-vision-proposals
+```
+
+视觉提案阶段会额外发送 `composite.png` 和候选框 overlay，让模型提出漏检元素、拆分建议和组件合并建议。模型返回的 bbox 只进入 `VisionProposal` 审计流：本地程序会 clamp 到画布、过滤异常面积、和已有候选做 IoU 去重，并把新增候选的 confidence 上限固定为 `0.55`。GPT 不直接写 XML，也不会覆盖 PSD 图层坐标。
+
+默认策略是 precision-first：
+
+```bash
+uiir extract path/to/input.psd --out out/input --use-openai \
+  --openai-vision-proposals \
+  --vision-policy strict \
+  --document-kind auto
+```
+
+`--vision-policy` 支持 `audit|strict|balanced`：`audit` 只审计不改 candidates，`strict` 只接受和本地候选有重叠的提案或安全的组件关系，`balanced` 保留较积极的实验策略。`--document-kind auto|screen|asset_sheet` 会把 `ui.psd` 这类控件素材表分流成 `asset_sheet`，避免把 sprite sheet 拆分结果直接塞进运行时屏幕树。输出目录会新增：
+
+```text
+vision_request_summary.json
+vision_proposals.json
+vision_accepted.json
+vision_quarantined.json
+vision_rejected.json
+relations.json
+semantic_patches.json
+vision_tiles/*.png
+```
 
 也可以切到第三方 OpenAI-compatible API 网关或模型供应商。项目只需要一个兼容 Responses API、图像输入和 Structured Outputs 的 endpoint：
 
@@ -158,6 +190,38 @@ uiir review-run out/openai-smoke
 
 没有 `OPENAI_API_KEY` 时，`compare-openai` 会写入 `comparison.json` 并标记为 skipped，不影响基础回归。OpenAI 分支只发送 `overlay.png`、候选框摘要和图层元数据摘要，不上传 PSD 原文件；模型只改 `type`、`role`、`text`、`style`、`layout`、`parent_hint` 等语义字段，不生成坐标或 XML。
 
+如果要测试真视觉识别，把视觉提案阶段打开。推荐仍然只跑 1-2 个 PSD，先确认 provider 支持图片输入和 JSON Schema：
+
+```bash
+uiir compare-openai fixtures/openai-smoke --out out/vision-smoke \
+  --provider-name third-party \
+  --api-key-env UIIR_PROVIDER_API_KEY \
+  --base-url "$UIIR_OPENAI_BASE_URL" \
+  --api-mode chat-completions \
+  --model gpt-5.5 \
+  --limit 2 \
+  --openai-vision-proposals \
+  --vision-policy strict \
+  --document-kind auto
+uiir review-run out/vision-smoke
+```
+
+这条链路会先生成 baseline，再在 OpenAI 分支执行：本地候选 -> GPT 视觉提案 -> 本地准入/隔离/融合 -> 重新绘制 overlay -> GPT 语义补丁 -> UIIR/XML。`comparison.json` 会额外统计 `vision.created/merged/quarantined/rejected`、语义补丁 accepted/rejected、无效 parent hint、Unknown 变化、document kind、vision policy 和 render pixel similarity 变化。
+
+持续自我迭代可以跑固定策略矩阵，生成本地榜单：
+
+```bash
+uiir iterate-openai fixtures/openai-smoke --out out/runs/provider-vision \
+  --provider-name third-party \
+  --api-key-env UIIR_PROVIDER_API_KEY \
+  --base-url "$UIIR_OPENAI_BASE_URL" \
+  --api-mode chat-completions \
+  --model gpt-5.5 \
+  --limit 2
+```
+
+`iterate-openai` 会依次跑 `semantic_v2 + audit/strict/balanced`，输出 `leaderboard.json` 和 `leaderboard.md`，用 schema、pixel gate、invalid parent、Unknown、type changes、semantic fill 等指标排序。
+
 第三方 provider 的 smoke 方式相同，只是把 key 环境变量和 base URL 换掉：
 
 ```bash
@@ -171,7 +235,7 @@ uiir compare-openai fixtures/game-ui-smoke --out out/provider-smoke \
   --limit 2
 ```
 
-`comparison.json` 会记录模型、`prompt_version`、schema 结果、像素相似度变化、Unknown 节点变化、role/layout/parent_hint 填充率变化和类型变化。`review-run` 会生成 `review.json` 与 `review.md`，用于持续发现退化样本。当前 prompt 版本记录在 `prompt_versions/semantic_v1.json`。
+`comparison.json` 会记录模型、`prompt_version`、schema 结果、像素相似度变化、Unknown 节点变化、role/layout/parent_hint 填充率变化和类型变化。`review-run` 会生成 `review.json` 与 `review.md`，用于持续发现退化样本。当前语义 prompt 版本记录在 `prompt_versions/semantic_v2.json`，后续迭代可以继续新增 `semantic_v3.json` 等版本横向比较。
 
 ## 本地检查器
 
@@ -197,8 +261,11 @@ npm run dev
 - `candidates.json`
 - `layer_metadata.json`
 - 可选 `uiir.json`、`uiir.xml`、`comparison.json`
+- 可选 `vision_quarantined.json`、`vision_rejected.json`、`semantic_patches.json`
 
 也可以点击 `Load demo sample` 直接加载一个内置小样例，再用 `Provider Smoke` 面板填写第三方 OpenAI-compatible `Base URL`、`Token`、`Model` 和 `API mode`，从浏览器直接调用 provider 做语义测试。Token 只存在当前浏览器标签页内，不写入仓库、不写入导出的结果文件。因为这是浏览器直连，第三方接口必须允许 CORS；如果 provider 不允许网页跨域请求，需要改用本地 CLI 的 `uiir compare-openai`。
+
+检查器的 Review Filters 可以切换 `All / Local / GPT Accepted / GPT Quarantined / GPT Rejected / Semantic Patch`。选中节点时会显示视觉提案原因、隔离/拒绝原因、相关 candidate id 和语义补丁审计，方便把模型建议变成人工确认的 `corrections.json`。
 
 如果 GitHub Pages 没有自动出现，请在仓库 `Settings -> Pages` 中把 source 设为 `GitHub Actions`，然后重新运行 `Deploy Inspector to GitHub Pages` workflow。
 

@@ -23,7 +23,7 @@ class CompareOptions:
     model: str = "gpt-5.5"
     detail: str = "original"
     limit: int = 2
-    prompt_version: str = "semantic_v1"
+    prompt_version: str = "semantic_v2"
     include_visual: bool = True
     include_ocr: bool = False
     min_area: int = 96
@@ -31,6 +31,26 @@ class CompareOptions:
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
     api_mode: str = "responses"
+    openai_vision_proposals: bool = False
+    vision_adapter: str = "openai"
+    vision_policy: str = "strict"
+    document_kind: str = "auto"
+
+
+@dataclass
+class IterateOptions:
+    model: str = "gpt-5.5"
+    detail: str = "original"
+    limit: int = 2
+    prompt_version: str = "semantic_v2"
+    include_visual: bool = True
+    include_ocr: bool = False
+    min_area: int = 96
+    provider_name: str = "openai"
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: str | None = None
+    api_mode: str = "responses"
+    document_kind: str = "auto"
 
 
 def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: CompareOptions) -> dict[str, Any]:
@@ -55,6 +75,10 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
             "detail": options.detail,
             "prompt_version": options.prompt_version,
             "limit": options.limit,
+            "openai_vision_proposals": options.openai_vision_proposals,
+            "vision_adapter": options.vision_adapter,
+            "vision_policy": options.vision_policy,
+            "document_kind": options.document_kind,
             "provider": provider_info,
             "created_at": _now(),
         }
@@ -82,16 +106,85 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
         "detail": options.detail,
         "prompt_version": options.prompt_version,
         "limit": options.limit,
+        "openai_vision_proposals": options.openai_vision_proposals,
+        "vision_adapter": options.vision_adapter,
+        "vision_policy": options.vision_policy,
+        "document_kind": options.document_kind,
         "provider": provider_info,
         "input": Path(input_dir).expanduser().resolve().as_posix(),
         "output": out_dir.as_posix(),
         "baseline": _metrics_summary(baseline_metrics),
         "openai": _metrics_summary(openai_metrics),
-        "gates": _gates(baseline_metrics, openai_metrics),
+        "gates": _gates(baseline_metrics, openai_metrics, comparisons),
         "items": comparisons,
     }
     _write_report(out_dir, report)
     _write_summary(out_dir, report)
+    return report
+
+
+def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: IterateOptions) -> dict[str, Any]:
+    out_dir = Path(output_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    provider = LLMProviderConfig(
+        provider_name=options.provider_name,
+        api_key_env=options.api_key_env,
+        base_url=options.base_url,
+        api_mode=options.api_mode,
+    ).normalized()
+    provider_info = provider_summary(provider)
+    if not resolve_api_key(provider):
+        report = {
+            "status": "skipped",
+            "reason": missing_api_key_reason(provider),
+            "model": options.model,
+            "detail": options.detail,
+            "prompt_version": options.prompt_version,
+            "provider": provider_info,
+            "created_at": _now(),
+            "runs": [],
+        }
+        _write_leaderboard(out_dir, report)
+        return report
+
+    runs = []
+    for policy in ("audit", "strict", "balanced"):
+        run_dir = out_dir / f"{options.prompt_version}-{policy}"
+        report = run_compare_openai(
+            input_dir,
+            run_dir,
+            CompareOptions(
+                model=options.model,
+                detail=options.detail,
+                limit=options.limit,
+                prompt_version=options.prompt_version,
+                include_visual=options.include_visual,
+                include_ocr=options.include_ocr,
+                min_area=options.min_area,
+                provider_name=options.provider_name,
+                api_key_env=options.api_key_env,
+                base_url=options.base_url,
+                api_mode=options.api_mode,
+                openai_vision_proposals=True,
+                vision_adapter="openai",
+                vision_policy=policy,
+                document_kind=options.document_kind,
+            ),
+        )
+        runs.append(_leaderboard_entry(policy, run_dir, report))
+
+    runs = sorted(runs, key=_leaderboard_sort_key, reverse=True)
+    report = {
+        "status": "ok",
+        "created_at": _now(),
+        "model": options.model,
+        "detail": options.detail,
+        "prompt_version": options.prompt_version,
+        "document_kind": options.document_kind,
+        "provider": provider_info,
+        "runs": runs,
+    }
+    _write_leaderboard(out_dir, report)
     return report
 
 
@@ -112,6 +205,10 @@ def review_run(run_dir: str | Path) -> dict[str, Any]:
             findings.append({"severity": "warning", "sample": name, "message": f"{item['invalid_parent_hints']} OpenAI parent hints are invalid"})
         if item.get("pixel_similarity_delta") is not None and item["pixel_similarity_delta"] < -0.04:
             findings.append({"severity": "warning", "sample": name, "message": f"Pixel similarity dropped by {item['pixel_similarity_delta']:.5f}"})
+        if item.get("vision", {}).get("rejected_proposals", 0) > 0:
+            findings.append({"severity": "info", "sample": name, "message": f"{item['vision']['rejected_proposals']} vision proposals rejected"})
+        if item.get("semantic_patches", {}).get("rejected", 0) > 0:
+            findings.append({"severity": "info", "sample": name, "message": f"{item['semantic_patches']['rejected']} semantic fields rejected"})
         if item.get("type_changes"):
             findings.append({"severity": "info", "sample": name, "message": f"{len(item['type_changes'])} node/candidate type changes"})
     review = {
@@ -142,6 +239,10 @@ def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_
             api_key_env=options.api_key_env,
             base_url=options.base_url,
             api_mode=options.api_mode,
+            openai_vision_proposals=use_openai and options.openai_vision_proposals,
+            vision_adapter=options.vision_adapter,
+            vision_policy=options.vision_policy,
+            document_kind=options.document_kind,
         ),
     )
     return {
@@ -175,17 +276,24 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
     base_types = Counter(node.get("type") for node in base_nodes)
     refined_types = Counter(node.get("type") for node in refined_nodes)
     type_changes = _candidate_type_changes(base_candidates, refined_candidates)
+    semantic_patch_counts = _semantic_patch_counts(refined_candidates)
+    vision_counts = _vision_counts(refined["output_dir"], refined_candidates)
     baseline_visual = _metric_item(base["output_dir"])
     openai_visual = _metric_item(refined["output_dir"])
     base_pixel = baseline_visual.get("visual", {}).get("pixel_similarity")
     openai_pixel = openai_visual.get("visual", {}).get("pixel_similarity")
+    openai_render_pixel = openai_visual.get("visual", {}).get("render_pixel_similarity", openai_pixel)
+    base_render_pixel = baseline_visual.get("visual", {}).get("render_pixel_similarity", base_pixel)
     return {
         "name": refined["name"],
         "source": refined["source"],
+        "document_kind": refined_uiir.get("metadata", {}).get("documentKind", "screen"),
+        "vision_policy": refined_uiir.get("metadata", {}).get("visionPolicy"),
         "baseline_output": base["output_dir"],
         "openai_output": refined["output_dir"],
         "baseline_node_count": len(base_nodes),
         "openai_node_count": len(refined_nodes),
+        "diagnostic_node_delta": len(refined_nodes) - len(base_nodes),
         "baseline_type_counts": dict(base_types),
         "openai_type_counts": dict(refined_types),
         "unknown_delta": refined_types.get("Unknown", 0) - base_types.get("Unknown", 0),
@@ -196,8 +304,16 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
         "baseline_pixel_similarity": base_pixel,
         "openai_pixel_similarity": openai_pixel,
         "pixel_similarity_delta": None if base_pixel is None or openai_pixel is None else round(openai_pixel - base_pixel, 5),
+        "baseline_render_pixel_similarity": base_render_pixel,
+        "openai_render_pixel_similarity": openai_render_pixel,
+        "render_pixel_similarity": openai_render_pixel,
+        "render_pixel_similarity_delta": None if base_render_pixel is None or openai_render_pixel is None else round(openai_render_pixel - base_render_pixel, 5),
         "invalid_parent_hints": _invalid_parent_hints(refined_candidates),
         "type_changes": type_changes,
+        "semantic_patches": semantic_patch_counts,
+        "type_guard_rejections": semantic_patch_counts.get("type_guard_rejections", 0),
+        "vision": vision_counts,
+        "quarantined_proposals": vision_counts.get("quarantined_proposals", 0),
     }
 
 
@@ -226,6 +342,45 @@ def _candidate_type_changes(base_candidates: list[dict[str, Any]], refined_candi
     return changes
 
 
+def _semantic_patch_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    accepted = 0
+    rejected = 0
+    patch_count = 0
+    type_guard_rejections = 0
+    for candidate in candidates:
+        for patch in candidate.get("metadata", {}).get("openaiSemanticPatches", []) or []:
+            patch_count += 1
+            accepted += len(patch.get("accepted", {}) or {})
+            patch_rejections = patch.get("rejected", []) or []
+            rejected += len(patch_rejections)
+            type_guard_rejections += sum(1 for item in patch_rejections if item.get("field") == "type")
+    return {"patches": patch_count, "accepted": accepted, "rejected": rejected, "type_guard_rejections": type_guard_rejections}
+
+
+def _vision_counts(output_dir: str | Path, candidates: list[dict[str, Any]]) -> dict[str, int]:
+    created = sum(1 for candidate in candidates if candidate.get("source") == "openai-vision-proposal")
+    merged = sum(1 for candidate in candidates if candidate.get("metadata", {}).get("openaiVision", {}).get("action") == "merged")
+    accepted_path = Path(output_dir) / "vision_accepted.json"
+    quarantined_path = Path(output_dir) / "vision_quarantined.json"
+    rejected_path = Path(output_dir) / "vision_rejected.json"
+    relations_path = Path(output_dir) / "relations.json"
+    accepted = len(_load_json(accepted_path)) if accepted_path.exists() else created + merged
+    quarantined = len(_load_json(quarantined_path)) if quarantined_path.exists() else 0
+    rejected = len(_load_json(rejected_path)) if rejected_path.exists() else 0
+    relations = _load_json(relations_path) if relations_path.exists() else {}
+    merge_suggestions = sum(1 for item in relations.get("merge_suggestions", []) or [] if item.get("accepted"))
+    split_suggestions = len(relations.get("split_suggestions", []) or [])
+    return {
+        "created_candidates": created,
+        "merged_proposals": merged,
+        "accepted_proposals": accepted,
+        "quarantined_proposals": quarantined,
+        "rejected_proposals": rejected,
+        "accepted_merge_suggestions": merge_suggestions,
+        "split_suggestions": split_suggestions,
+    }
+
+
 def _invalid_parent_hints(candidates: list[dict[str, Any]]) -> int:
     ids = {candidate.get("id") for candidate in candidates}
     layer_refs = {ref for candidate in candidates for ref in candidate.get("source_refs", []) if isinstance(ref, str) and ref.startswith("layer:")}
@@ -237,15 +392,24 @@ def _invalid_parent_hints(candidates: list[dict[str, Any]]) -> int:
     return invalid
 
 
-def _gates(baseline: dict[str, Any], openai: dict[str, Any]) -> dict[str, Any]:
+def _gates(baseline: dict[str, Any], openai: dict[str, Any], comparisons: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     baseline_pixel = baseline.get("avg_pixel_similarity")
     openai_pixel = openai.get("avg_pixel_similarity")
     pixel_floor = round((baseline_pixel or PIXEL_BASELINE) * PIXEL_MIN_RATIO, 5)
+    items = comparisons or []
     return {
         "schema_ok_not_lower": openai.get("schema_ok", 0) >= baseline.get("schema_ok", 0),
         "failed_zero": True,
         "pixel_floor": pixel_floor,
         "pixel_not_significantly_lower": openai_pixel is None or openai_pixel >= pixel_floor,
+        "unknown_not_increased": all((item.get("unknown_delta") or 0) <= 0 for item in items),
+        "invalid_parent_hints_zero": all((item.get("invalid_parent_hints") or 0) == 0 for item in items),
+        "semantic_fill_positive": any(
+            (item.get("role_fill_delta") or 0) > 0
+            or (item.get("layout_fill_delta") or 0) > 0
+            or (item.get("parent_hint_fill_delta") or 0) > 0
+            for item in items
+        ),
     }
 
 
@@ -260,6 +424,78 @@ def _metrics_summary(metrics: dict[str, Any]) -> dict[str, Any]:
 
 def _write_report(out_dir: Path, report: dict[str, Any]) -> None:
     (out_dir / "comparison.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any]) -> dict[str, Any]:
+    items = report.get("items", []) or []
+    gates = report.get("gates", {}) or {}
+    type_changes = sum(len(item.get("type_changes", []) or []) for item in items)
+    type_guard_rejections = sum(item.get("type_guard_rejections", 0) or 0 for item in items)
+    quarantined = sum(item.get("quarantined_proposals", 0) or 0 for item in items)
+    semantic_gain = sum(
+        max(0.0, item.get("role_fill_delta") or 0.0)
+        + max(0.0, item.get("layout_fill_delta") or 0.0)
+        + max(0.0, item.get("parent_hint_fill_delta") or 0.0)
+        for item in items
+    )
+    openai_pixel = report.get("openai", {}).get("avg_pixel_similarity")
+    baseline_pixel = report.get("baseline", {}).get("avg_pixel_similarity")
+    score = 0
+    score += 30 if gates.get("schema_ok_not_lower") else 0
+    score += 20 if gates.get("pixel_not_significantly_lower") else 0
+    score += 15 if gates.get("invalid_parent_hints_zero") else 0
+    score += 15 if gates.get("unknown_not_increased") else 0
+    score += 10 if gates.get("semantic_fill_positive") else 0
+    score -= type_changes
+    return {
+        "policy": policy,
+        "status": report.get("status"),
+        "run_dir": run_dir.as_posix(),
+        "score": round(score + semantic_gain, 5),
+        "schema_ok": report.get("openai", {}).get("schema_ok"),
+        "baseline_pixel_similarity": baseline_pixel,
+        "openai_pixel_similarity": openai_pixel,
+        "pixel_not_significantly_lower": gates.get("pixel_not_significantly_lower"),
+        "invalid_parent_hints_zero": gates.get("invalid_parent_hints_zero"),
+        "unknown_not_increased": gates.get("unknown_not_increased"),
+        "semantic_fill_positive": gates.get("semantic_fill_positive"),
+        "type_changes": type_changes,
+        "type_guard_rejections": type_guard_rejections,
+        "quarantined_proposals": quarantined,
+    }
+
+
+def _leaderboard_sort_key(entry: dict[str, Any]) -> tuple:
+    return (
+        bool(entry.get("pixel_not_significantly_lower")),
+        bool(entry.get("invalid_parent_hints_zero")),
+        bool(entry.get("unknown_not_increased")),
+        -int(entry.get("type_changes") or 0),
+        float(entry.get("score") or 0),
+    )
+
+
+def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "leaderboard.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [
+        "# OpenAI Iteration Leaderboard",
+        "",
+        f"- status: {report.get('status')}",
+        f"- provider: {report.get('provider', {}).get('provider_name')}",
+        f"- model: {report.get('model')}",
+        f"- prompt_version: {report.get('prompt_version')}",
+        "",
+        "| policy | score | pixel | gate | type changes | quarantined |",
+        "| --- | ---: | ---: | --- | ---: | ---: |",
+    ]
+    for run in report.get("runs", []) or []:
+        gate = "pass" if run.get("pixel_not_significantly_lower") and run.get("invalid_parent_hints_zero") and run.get("unknown_not_increased") else "review"
+        lines.append(
+            f"| {run.get('policy')} | {run.get('score')} | {run.get('openai_pixel_similarity')} | "
+            f"{gate} | {run.get('type_changes')} | {run.get('quarantined_proposals')} |"
+        )
+    (out_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:
@@ -277,7 +513,16 @@ def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:
         "## Items",
     ]
     for item in report.get("items", []):
-        lines.append(f"- {item['name']}: type_changes={len(item['type_changes'])}, unknown_delta={item['unknown_delta']}, pixel_delta={item['pixel_similarity_delta']}")
+        vision = item.get("vision", {})
+        semantic = item.get("semantic_patches", {})
+        lines.append(
+            f"- {item['name']}: type_changes={len(item['type_changes'])}, "
+            f"unknown_delta={item['unknown_delta']}, pixel_delta={item['pixel_similarity_delta']}, "
+            f"document_kind={item.get('document_kind')}, "
+            f"vision_created={vision.get('created_candidates', 0)}, "
+            f"vision_quarantined={vision.get('quarantined_proposals', 0)}, "
+            f"semantic_rejected={semantic.get('rejected', 0)}"
+        )
     (out_dir / "regression_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

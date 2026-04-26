@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .batch import run_batch
-from .compare_openai import CompareOptions, review_run, run_compare_openai
+from .compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
 from .evaluate import evaluate_outputs
 from .fixtures import download_fixture_set, list_fixture_sets
 from .pipeline import ExtractOptions, run_extract
@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     extract.add_argument("--use-openai", action="store_true", help="Use GPT-5.5 semantic refinement.")
     extract.add_argument("--model", default="gpt-5.5", help="OpenAI model for semantic refinement.")
     extract.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
+    _add_vision_args(extract)
+    _add_document_args(extract)
     _add_provider_args(extract)
     extract.add_argument("--corrections", help="Optional corrections.json exported from the inspector.")
 
@@ -49,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     batch.add_argument("--use-openai", nargs="?", const=True, default=False, type=_parse_bool, help="Use GPT-5.5 semantic refinement.")
     batch.add_argument("--model", default="gpt-5.5", help="OpenAI model for semantic refinement.")
     batch.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
+    _add_vision_args(batch)
+    _add_document_args(batch)
     _add_provider_args(batch)
     batch.add_argument("--corrections", help="Optional corrections.json applied to every item.")
 
@@ -63,10 +67,24 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--limit", type=int, default=2, help="Maximum PSD files to process. Defaults to 2.")
     compare.add_argument("--model", default="gpt-5.5", help="OpenAI model for semantic refinement.")
     compare.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
-    compare.add_argument("--prompt-version", default="semantic_v1", help="Prompt/schema version identifier.")
+    compare.add_argument("--prompt-version", default="semantic_v2", help="Prompt/schema version identifier.")
+    _add_vision_args(compare)
+    _add_document_args(compare)
     _add_provider_args(compare)
     compare.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
     compare.add_argument("--min-area", type=int, default=96, help="Minimum candidate area in pixels.")
+
+    iterate = subparsers.add_parser("iterate-openai", help="Run a small OpenAI policy matrix and write a leaderboard.")
+    iterate.add_argument("input", help="Input PSD/PSB file or fixture directory.")
+    iterate.add_argument("--out", required=True, help="Output iteration directory.")
+    iterate.add_argument("--limit", type=int, default=2, help="Maximum PSD files to process. Defaults to 2.")
+    iterate.add_argument("--model", default="gpt-5.5", help="OpenAI model for semantic refinement.")
+    iterate.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
+    iterate.add_argument("--prompt-version", default="semantic_v2", help="Prompt/schema version identifier.")
+    _add_document_args(iterate)
+    _add_provider_args(iterate)
+    iterate.add_argument("--ocr", action="store_true", help="Enable optional local OCR candidates.")
+    iterate.add_argument("--min-area", type=int, default=96, help="Minimum candidate area in pixels.")
 
     review = subparsers.add_parser("review-run", help="Review a compare-openai run and write issue summaries.")
     review.add_argument("run", help="Directory containing comparison.json.")
@@ -85,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         return _evaluate(args)
     if args.command == "compare-openai":
         return _compare_openai(args)
+    if args.command == "iterate-openai":
+        return _iterate_openai(args)
     if args.command == "review-run":
         return _review_run(args)
     if args.command == "schema":
@@ -106,6 +126,10 @@ def _extract(args: argparse.Namespace) -> int:
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         api_mode=args.api_mode,
+        openai_vision_proposals=args.openai_vision_proposals,
+        vision_adapter=args.vision_adapter,
+        vision_policy=args.vision_policy,
+        document_kind=args.document_kind,
         corrections=args.corrections,
     )
     try:
@@ -140,6 +164,10 @@ def _compare_openai(args: argparse.Namespace) -> int:
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         api_mode=args.api_mode,
+        openai_vision_proposals=args.openai_vision_proposals,
+        vision_adapter=args.vision_adapter,
+        vision_policy=args.vision_policy,
+        document_kind=args.document_kind,
     )
     try:
         report = run_compare_openai(args.input, args.out, options)
@@ -156,6 +184,35 @@ def _compare_openai(args: argparse.Namespace) -> int:
         print(f"baseline_avg_pixel_similarity: {report['baseline']['avg_pixel_similarity']}")
         print(f"openai_avg_pixel_similarity: {report['openai']['avg_pixel_similarity']}")
     print(f"comparison: {Path(args.out).expanduser().resolve() / 'comparison.json'}")
+    return 0
+
+
+def _iterate_openai(args: argparse.Namespace) -> int:
+    options = IterateOptions(
+        model=args.model,
+        detail=args.detail,
+        limit=args.limit,
+        prompt_version=args.prompt_version,
+        include_ocr=args.ocr,
+        min_area=args.min_area,
+        provider_name=args.provider_name,
+        api_key_env=args.api_key_env,
+        base_url=args.base_url,
+        api_mode=args.api_mode,
+        document_kind=args.document_kind,
+    )
+    try:
+        report = run_iterate_openai(args.input, args.out, options)
+    except Exception as exc:
+        print(f"uiir iterate-openai failed: {exc}", file=sys.stderr)
+        return 2
+    print("UIIR OpenAI iteration complete")
+    print(f"status: {report['status']}")
+    if report["status"] == "skipped":
+        print(f"reason: {report.get('reason')}")
+    else:
+        print(f"runs: {len(report.get('runs', []))}")
+    print(f"leaderboard: {Path(args.out).expanduser().resolve() / 'leaderboard.json'}")
     return 0
 
 
@@ -202,6 +259,10 @@ def _batch(args: argparse.Namespace) -> int:
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         api_mode=args.api_mode,
+        openai_vision_proposals=args.openai_vision_proposals,
+        vision_adapter=args.vision_adapter,
+        vision_policy=args.vision_policy,
+        document_kind=args.document_kind,
         corrections=args.corrections,
     )
     try:
@@ -262,6 +323,35 @@ def _add_provider_args(parser: argparse.ArgumentParser) -> None:
         default="responses",
         choices=("responses", "chat-completions"),
         help="OpenAI-compatible API surface to use. Defaults to responses.",
+    )
+
+
+def _add_vision_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--openai-vision-proposals",
+        action="store_true",
+        help="Ask the vision model to propose missing UI candidates before semantic refinement.",
+    )
+    parser.add_argument(
+        "--vision-adapter",
+        default="openai",
+        choices=("openai", "omniparser"),
+        help="Vision proposal adapter. OmniParser is reserved for optional local integration.",
+    )
+    parser.add_argument(
+        "--vision-policy",
+        default="strict",
+        choices=("audit", "strict", "balanced"),
+        help="Vision proposal acceptance policy. Defaults to strict.",
+    )
+
+
+def _add_document_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--document-kind",
+        default="auto",
+        choices=("auto", "screen", "asset_sheet"),
+        help="PSD intent classification. Defaults to auto.",
     )
 
 

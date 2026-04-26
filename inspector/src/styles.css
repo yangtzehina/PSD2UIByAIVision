@@ -177,6 +177,24 @@ select {
   background: #fff;
 }
 
+.reviewFilters {
+  margin-top: 20px;
+  border: 1px solid #d4dbe7;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.reviewFilters header {
+  min-height: 42px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #d4dbe7;
+  font-weight: 800;
+}
+
+.reviewFilters .segmented {
+  padding: 10px;
+}
+
 .providerBody {
   display: grid;
   gap: 10px;
@@ -545,6 +563,18 @@ select {
 .segmented button.active {
   background: #172033;
   color: #fff;
+}
+
+.segmented.vertical {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.segmented.vertical button {
+  justify-content: flex-start;
+  min-height: 34px;
+  text-align: left;
 }
 
 .tree,

@@ -31,6 +31,89 @@ OPENAI_SEMANTICS_SCHEMA = {
 }
 
 
+OPENAI_VISION_PROPOSALS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items", "merge_suggestions", "split_suggestions"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["proposal_id", "bbox", "type", "confidence", "text", "role", "reason", "related_candidate_ids"],
+                "properties": {
+                    "proposal_id": {"type": "string"},
+                    "bbox": {"$ref": "#/$defs/proposal_bbox"},
+                    "type": {"type": "string", "enum": list(NODE_TYPES)},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "text": {"type": "string"},
+                    "role": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "related_candidate_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "merge_suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["component_group_id", "type", "candidate_ids", "reason"],
+                "properties": {
+                    "component_group_id": {"type": "string"},
+                    "type": {"type": "string", "enum": list(NODE_TYPES)},
+                    "candidate_ids": {"type": "array", "items": {"type": "string"}},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+        "split_suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["candidate_id", "reason", "items"],
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["proposal_id", "bbox", "type", "confidence", "text", "role", "reason"],
+                            "properties": {
+                                "proposal_id": {"type": "string"},
+                                "bbox": {"$ref": "#/$defs/proposal_bbox"},
+                                "type": {"type": "string", "enum": list(NODE_TYPES)},
+                                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                                "text": {"type": "string"},
+                                "role": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    "$defs": {
+        "proposal_bbox": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["x", "y", "w", "h"],
+            "properties": {
+                "x": {"type": "integer"},
+                "y": {"type": "integer"},
+                "w": {"type": "integer", "minimum": 0},
+                "h": {"type": "integer", "minimum": 0},
+            },
+        }
+    },
+}
+
+
 UIIR_JSON_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "UIIRDocument",

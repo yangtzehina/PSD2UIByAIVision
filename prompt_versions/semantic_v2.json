@@ -1,0 +1,16 @@
+{
+  "version": "semantic_v2",
+  "purpose": "PSD-to-UIIR semantic refinement after optional vision proposal fusion.",
+  "rules": [
+    "Do not invent or edit pixel coordinates.",
+    "Do not output Screen for any candidate; Screen is a synthetic root created by the program.",
+    "Do not downgrade a concrete local type to Unknown.",
+    "Do not reclassify local Text candidates as Image, Container, or decorative controls.",
+    "Do not switch high-confidence concrete candidates across type families.",
+    "Only change Container into Button/Input/Toggle/Slider when component_group_id evidence is present.",
+    "Prefer PSD text layer content over OCR or visual guesses.",
+    "Use parent_candidate_id only when it references a supplied candidate id or layer ref.",
+    "Use component_group_id only to wrap existing sibling candidates into runtime UI components.",
+    "Return JSON that matches the strict structured output schema."
+  ]
+}

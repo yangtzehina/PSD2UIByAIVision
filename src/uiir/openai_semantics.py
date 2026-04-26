@@ -19,7 +19,7 @@ def refine_candidates_with_openai(
     model: str = "gpt-5.5",
     detail: str = "original",
     audit_dir: str | Path | None = None,
-    prompt_version: str = "semantic_v1",
+    prompt_version: str = "semantic_v2",
     provider: LLMProviderConfig | None = None,
 ) -> list[Candidate]:
     provider = (provider or LLMProviderConfig()).normalized()
@@ -31,6 +31,11 @@ def refine_candidates_with_openai(
             "Do not invent pixel coordinates.",
             "Return one item per useful candidate id when possible.",
             "Prefer PSD layer text over OCR guesses.",
+            "Do not return Screen for candidates; Screen is a synthetic root created by the program.",
+            "Do not downgrade a concrete local type to Unknown unless the local type is already Unknown.",
+            "Do not reclassify local Text candidates as Image, Container, or decorative controls.",
+            "Do not switch high-confidence concrete candidates across type families.",
+            "Only change Container into Button/Input/Toggle/Slider when component_group_id evidence is present.",
             "Use Unknown for ambiguous decorative elements.",
             "Use List/Grid/ScrollView only for repeated or scrollable regions.",
             "style may be empty unless a supplied text style is clearly useful.",
@@ -63,21 +68,153 @@ def refine_candidates_with_openai(
         provider=provider,
     )
     by_id = {candidate.id: candidate for candidate in candidates}
+    valid_parent_refs = set(by_id)
+    valid_parent_refs.update(ref for candidate in candidates for ref in candidate.source_refs if ref.startswith("layer:"))
+    semantic_patches = []
     for item in parsed.get("items", []):
         candidate = by_id.get(item.get("candidate_id"))
         if not candidate:
             continue
-        candidate.type_hint = coerce_node_type(item.get("type"))
+        patch = _new_semantic_patch(candidate, item)
+        if item.get("component_group_id"):
+            candidate.metadata["openaiProposedComponentGroupId"] = item["component_group_id"]
+        _merge_semantic_type(candidate, item.get("type"), patch)
         candidate.confidence = max(candidate.confidence, float(item.get("confidence") or 0))
-        candidate.role = item.get("role") or candidate.role
-        candidate.text = item.get("text") or candidate.text
-        candidate.style = item.get("style") or candidate.style
-        candidate.layout = item.get("layout") or candidate.layout
-        candidate.parent_hint = item.get("parent_candidate_id") or candidate.parent_hint
+        _merge_optional_text_field(candidate, patch, "role", item.get("role"))
+        _merge_text(candidate, patch, item.get("text"))
+        _merge_optional_text_field(candidate, patch, "style", item.get("style"))
+        _merge_optional_text_field(candidate, patch, "layout", item.get("layout"))
+        _merge_parent_hint(candidate, patch, item.get("parent_candidate_id"), valid_parent_refs)
         if item.get("component_group_id"):
             candidate.metadata["openaiComponentGroupId"] = item["component_group_id"]
+            patch["accepted"]["component_group_id"] = item["component_group_id"]
         candidate.metadata["openai"] = item
+        candidate.metadata.setdefault("openaiSemanticPatches", []).append(patch)
+        semantic_patches.append(patch)
+    _write_semantic_patch_audit(audit_dir, semantic_patches)
     return candidates
+
+
+def _new_semantic_patch(candidate: Candidate, item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate.id,
+        "proposed": {
+            "type": item.get("type"),
+            "role": item.get("role") or "",
+            "text": item.get("text") or "",
+            "style": item.get("style") or "",
+            "layout": item.get("layout") or "",
+            "parent_candidate_id": item.get("parent_candidate_id") or "",
+            "component_group_id": item.get("component_group_id") or "",
+        },
+        "accepted": {},
+        "rejected": [],
+    }
+
+
+def _merge_semantic_type(candidate: Candidate, value: Any, patch: dict[str, Any] | None = None) -> None:
+    semantic_type = coerce_node_type(value)
+    if semantic_type == "Screen":
+        _reject_openai_field(candidate, "type", value, "screen_is_synthetic_root", patch)
+        return
+    if semantic_type == "Unknown" and candidate.type_hint != "Unknown":
+        _reject_openai_field(candidate, "type", value, "unknown_downgrade_blocked", patch)
+        return
+    if candidate.type_hint == "Text" and semantic_type != "Text":
+        _reject_openai_field(candidate, "type", value, "text_type_preserved", patch)
+        return
+    if _is_interactive_type(candidate.type_hint) and _is_interactive_type(semantic_type) and candidate.type_hint != semantic_type:
+        _reject_openai_field(candidate, "type", value, "interactive_type_change_blocked", patch)
+        return
+    if candidate.type_hint == "Container" and _is_interactive_type(semantic_type) and not _has_component_evidence(candidate):
+        _reject_openai_field(candidate, "type", value, "container_to_interactive_requires_group_evidence", patch)
+        return
+    if (
+        candidate.confidence >= 0.68
+        and candidate.type_hint not in {"Unknown", semantic_type}
+        and semantic_type != "Unknown"
+        and _type_family(candidate.type_hint) != _type_family(semantic_type)
+    ):
+        _reject_openai_field(candidate, "type", value, "cross_family_type_change_blocked", patch)
+        return
+    candidate.type_hint = semantic_type
+    if patch is not None:
+        patch["accepted"]["type"] = semantic_type
+
+
+def _is_interactive_type(node_type: str) -> bool:
+    return node_type in {"Button", "Input", "Toggle", "Slider"}
+
+
+def _has_component_evidence(candidate: Candidate) -> bool:
+    metadata = candidate.metadata or {}
+    return bool(
+        metadata.get("openaiComponentGroupId")
+        or metadata.get("openaiProposedComponentGroupId")
+        or metadata.get("openaiVisionRelations")
+        or metadata.get("componentGroupId")
+    )
+
+
+def _type_family(node_type: str) -> str:
+    if node_type == "Text":
+        return "text"
+    if node_type in {"Image", "Icon", "Background"}:
+        return "visual"
+    if node_type in {"Container", "List", "Grid", "ScrollView"}:
+        return "structure"
+    if _is_interactive_type(node_type):
+        return "interactive"
+    return node_type.lower()
+
+
+def _merge_optional_text_field(candidate: Candidate, patch: dict[str, Any], field: str, value: Any) -> None:
+    if not value:
+        return
+    setattr(candidate, field, str(value))
+    patch["accepted"][field] = str(value)
+
+
+def _merge_text(candidate: Candidate, patch: dict[str, Any], value: Any) -> None:
+    if not value:
+        return
+    if candidate.text and candidate.text != value:
+        _reject_openai_field(candidate, "text", value, "existing_text_preserved", patch)
+        return
+    candidate.text = str(value)
+    patch["accepted"]["text"] = str(value)
+
+
+def _merge_parent_hint(candidate: Candidate, patch: dict[str, Any], value: Any, valid_parent_refs: set[str]) -> None:
+    if not value:
+        return
+    hint = str(value)
+    if hint not in valid_parent_refs:
+        _reject_openai_field(candidate, "parent_candidate_id", hint, "invalid_parent_hint", patch)
+        return
+    candidate.parent_hint = hint
+    patch["accepted"]["parent_candidate_id"] = hint
+
+
+def _reject_openai_field(candidate: Candidate, field: str, value: Any, reason: str, patch: dict[str, Any] | None = None) -> None:
+    rejection = {
+        "field": field,
+        "value": value,
+        "reason": reason,
+    }
+    candidate.metadata.setdefault("openaiRejected", []).append(
+        rejection
+    )
+    if patch is not None:
+        patch["rejected"].append(rejection)
+
+
+def _write_semantic_patch_audit(audit_dir: str | Path | None, patches: list[dict[str, Any]]) -> None:
+    if not audit_dir:
+        return
+    output = Path(audit_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "semantic_patches.json").write_text(json.dumps(patches, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _create_semantic_response(client: Any, provider: LLMProviderConfig, model: str, prompt: str, data_url: str, detail: str) -> Any:

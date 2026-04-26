@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from uiir.compare_openai import CompareOptions, review_run, run_compare_openai
+from uiir.compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
 
 
 class CompareOpenAITests(unittest.TestCase):
@@ -74,6 +74,20 @@ class CompareOpenAITests(unittest.TestCase):
 
             self.assertEqual(review["finding_count"], 4)
             self.assertTrue((root / "review.md").exists())
+
+    def test_iterate_openai_skips_without_api_key(self):
+        old_key = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                report = run_iterate_openai(root, root / "out", IterateOptions(limit=2))
+
+                self.assertEqual(report["status"], "skipped")
+                self.assertTrue((root / "out" / "leaderboard.json").exists())
+                self.assertTrue((root / "out" / "leaderboard.md").exists())
+        finally:
+            if old_key is not None:
+                os.environ["OPENAI_API_KEY"] = old_key
 
 
 if __name__ == "__main__":
