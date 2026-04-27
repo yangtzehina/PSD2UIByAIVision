@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .adapters import list_vision_adapters, run_vision_adapter
 from .batch import run_batch
+from .closeout import CloseoutOptions, DEFAULT_SENSITIVE_PATTERNS, run_closeout
 from .compare_openai import CompareOptions, IterateOptions, review_run, run_compare_openai, run_iterate_openai
 from .curate import curate_run
 from .datasets import import_rico_dataset
@@ -127,6 +128,22 @@ def main(argv: list[str] | None = None) -> int:
     fidelity.add_argument("--out", help="Report output directory. Defaults to the extract output directory.")
     fidelity.add_argument("--probe-photoshopapi", action="store_true", help="Check whether PhotoshopAPI is importable without requiring it.")
 
+    closeout = subparsers.add_parser("closeout", help="Run deterministic closeout checks and write a release report.")
+    closeout.add_argument("--out", default="out/closeout", help="Output directory for closeout_report.json and artifacts.")
+    closeout.add_argument("--fixtures", default="fixtures/game-ui-smoke", help="Fixture directory for local baseline.")
+    closeout.add_argument("--openai-fixtures", default="fixtures/openai-smoke", help="Fixture directory for no-key/provider smoke.")
+    closeout.add_argument("--golden", default="goldens/local", help="Optional local golden directory used when provider smoke is enabled.")
+    closeout.add_argument("--model", default="gpt-5.5", help="Model label for provider smoke.")
+    closeout.add_argument("--detail", default="original", choices=("low", "high", "original", "auto"), help="Image detail level.")
+    _add_provider_args(closeout)
+    closeout.set_defaults(provider_name="third-party", api_key_env="UIIR_PROVIDER_API_KEY", api_mode="chat-completions")
+    closeout.add_argument("--limit", type=int, default=2, help="Provider smoke sample limit.")
+    closeout.add_argument("--run-provider-smoke", action="store_true", help="Run the real provider smoke if the configured API key is present.")
+    closeout.add_argument("--skip-inspector-build", action="store_true", help="Skip the Inspector production build.")
+    closeout.add_argument("--skip-adapter", action="store_true", help="Skip local UIED adapter diagnostics.")
+    closeout.add_argument("--dry-run", action="store_true", help="Write the planned closeout report without running checks.")
+    closeout.add_argument("--sensitive-pattern", action="append", default=[], help="Extra local regex for the tracked-file sensitive scan.")
+
     compare = subparsers.add_parser("compare-openai", help="Compare local baseline against GPT-5.5 semantic refinement.")
     compare.add_argument("input", help="Input PSD/PSB file or fixture directory.")
     compare.add_argument("--out", required=True, help="Output comparison directory.")
@@ -189,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         return _dataset(args)
     if args.command == "fidelity":
         return _fidelity(args)
+    if args.command == "closeout":
+        return _closeout(args)
     if args.command == "compare-openai":
         return _compare_openai(args)
     if args.command == "iterate-openai":
@@ -468,6 +487,40 @@ def _fidelity(args: argparse.Namespace) -> int:
     print(f"text_layers: {counts.get('text_layers', 0)}")
     print(f"smart_object_ish_layers: {counts.get('smart_object_ish_layers', 0)}")
     print(f"report: {Path(report['paths']['report'])}")
+    return 0
+
+
+def _closeout(args: argparse.Namespace) -> int:
+    options = CloseoutOptions(
+        output_dir=args.out,
+        fixture_dir=args.fixtures,
+        openai_fixture_dir=args.openai_fixtures,
+        golden_root=args.golden,
+        model=args.model,
+        detail=args.detail,
+        provider_name=args.provider_name,
+        api_key_env=args.api_key_env,
+        base_url=args.base_url,
+        api_mode=args.api_mode,
+        limit=args.limit,
+        run_provider_smoke=args.run_provider_smoke,
+        skip_inspector_build=args.skip_inspector_build,
+        skip_adapter=args.skip_adapter,
+        dry_run=args.dry_run,
+        sensitive_patterns=tuple(DEFAULT_SENSITIVE_PATTERNS) + tuple(args.sensitive_pattern or []),
+    )
+    try:
+        report = run_closeout(options)
+    except Exception as exc:
+        print(f"uiir closeout failed: {exc}", file=sys.stderr)
+        return 2
+    print("UIIR closeout complete")
+    print(f"status: {report.get('status')}")
+    print(f"report: {Path(args.out).expanduser().resolve() / 'closeout_report.json'}")
+    failed_gates = [key for key, ok in (report.get("gates") or {}).items() if not ok]
+    if failed_gates:
+        print(f"failed gates: {', '.join(failed_gates)}")
+        return 1
     return 0
 
 

@@ -263,7 +263,7 @@ def _apply_relation_decision(candidates: list[Candidate], relation: dict[str, An
 
 def _proposal_index(run_root: Path) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
-    for name in ("vision_quarantined.json", "vision_rejected.json", "vision_accepted.json"):
+    for name in ("vision_quarantined.json", "vision_rejected.json", "vision_accepted.json", "relation_quarantined.json"):
         path = run_root / name
         if not path.exists():
             continue
@@ -283,6 +283,19 @@ def _relation_index(run_root: Path) -> dict[str, dict[str, Any]]:
     quarantined = _load_optional_json(run_root / "vision_quarantined.json")
     for item in quarantined if isinstance(quarantined, list) else []:
         if isinstance(item, dict) and item.get("component_group_id"):
+            index[_strip_target_prefix(str(item["component_group_id"]))] = item
+    relation_patches = _load_optional_json(run_root / "relation_patches.json")
+    if isinstance(relation_patches, dict):
+        for item in relation_patches.get("accepted_relation_patches", []) or []:
+            if not isinstance(item, dict) or not item.get("patch_id"):
+                continue
+            relation = dict(item)
+            relation.setdefault("candidate_ids", [value for value in (item.get("from_id"), item.get("to_id")) if value])
+            relation.setdefault("component_group_id", item.get("patch_id"))
+            index[_strip_target_prefix(str(item["patch_id"]))] = relation
+        for item in relation_patches.get("accepted_component_group_patches", []) or []:
+            if not isinstance(item, dict) or not item.get("component_group_id"):
+                continue
             index[_strip_target_prefix(str(item["component_group_id"]))] = item
     return index
 

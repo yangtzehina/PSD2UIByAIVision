@@ -174,6 +174,27 @@ select {
   font-size: 12px;
 }
 
+.relationPatchActions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.relationPatchActions button {
+  min-height: 30px;
+  border: 1px solid #d4dbe7;
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  cursor: pointer;
+}
+
+.relationPatchActions button:first-child {
+  border-color: #172033;
+  background: #172033;
+  color: #fff;
+}
+
 .providerPanel {
   margin-top: 20px;
   min-width: 0;

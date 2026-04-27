@@ -77,6 +77,8 @@ function App() {
   const [layers, setLayers] = useState([]);
   const [visionQuarantined, setVisionQuarantined] = useState([]);
   const [visionRejected, setVisionRejected] = useState([]);
+  const [relationPatches, setRelationPatches] = useState(null);
+  const [relationQuarantined, setRelationQuarantined] = useState([]);
   const [semanticPatches, setSemanticPatches] = useState([]);
   const [renderReview, setRenderReview] = useState(null);
   const [xml, setXml] = useState("");
@@ -94,7 +96,11 @@ function App() {
   const semanticPatchByCandidate = useMemo(() => groupSemanticPatches(semanticPatches), [semanticPatches]);
   const enrichedCandidates = useMemo(() => enrichCandidates(candidates, semanticPatchByCandidate), [candidates, semanticPatchByCandidate]);
   const rejectedBoxes = useMemo(() => rejectedProposalBoxes(visionRejected), [visionRejected]);
-  const quarantinedBoxes = useMemo(() => proposalBoxes(visionQuarantined, "openai-vision-quarantined"), [visionQuarantined]);
+  const relationQuarantinedBoxes = useMemo(() => proposalBoxes(relationQuarantined, "openai-relation-quarantined"), [relationQuarantined]);
+  const quarantinedBoxes = useMemo(
+    () => [...proposalBoxes(visionQuarantined, "openai-vision-quarantined"), ...relationQuarantinedBoxes],
+    [visionQuarantined, relationQuarantinedBoxes],
+  );
   const usingCandidates = enrichedCandidates.length > 0;
   const sourceBoxes = usingCandidates ? enrichedCandidates : nodes;
   const boxes = useMemo(() => filterReviewBoxes(sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter), [sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter]);
@@ -119,6 +125,8 @@ function App() {
     setLayers(demo.layers);
     setVisionQuarantined([]);
     setVisionRejected([]);
+    setRelationPatches(null);
+    setRelationQuarantined([]);
     setSemanticPatches([]);
     setRenderReview(null);
     setXml(demo.xml);
@@ -160,6 +168,10 @@ function App() {
     const identity = decisionIdentityFor(selected, selectedUsesCandidate);
     const correction = getCorrection(corrections, selected, selectedUsesCandidate);
     const patch = includeEdits ? decisionOverrides(mergeTarget(selected, correction)) : {};
+    upsertGoldenDecisionFor(identity, decision, patch);
+  };
+
+  const upsertGoldenDecisionFor = (identity, decision, patch = {}) => {
     setGoldenDecisions((items) => {
       const index = items.findIndex((item) => item.target_kind === identity.target_kind && item.target_id === identity.target_id);
       const next = [...items];
@@ -194,6 +206,8 @@ function App() {
         <FileInput icon={<Layers size={18} />} label="layer_metadata.json" accept=".json,application/json" onFile={readLayers(setLayers)} />
         <FileInput icon={<FileJson size={18} />} label="vision_quarantined.json" accept=".json,application/json" onFile={readJson(setVisionQuarantined)} />
         <FileInput icon={<FileJson size={18} />} label="vision_rejected.json" accept=".json,application/json" onFile={readJson(setVisionRejected)} />
+        <FileInput icon={<FileJson size={18} />} label="relation_patches.json" accept=".json,application/json" onFile={readJson(setRelationPatches)} />
+        <FileInput icon={<FileJson size={18} />} label="relation_quarantined.json" accept=".json,application/json" onFile={readJson(setRelationQuarantined)} />
         <FileInput icon={<FileJson size={18} />} label="semantic_patches.json" accept=".json,application/json" onFile={readJson(setSemanticPatches)} />
         <FileInput icon={<FileJson size={18} />} label="render_review.json" accept=".json,application/json" onFile={readJson(setRenderReview)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
@@ -211,6 +225,7 @@ function App() {
           <Metric label="Layers" value={layers.length || "0"} />
           <Metric label="Quarantine" value={quarantinedBoxes.length || "0"} />
           <Metric label="Rejected" value={rejectedBoxes.length || "0"} />
+          <Metric label="Relations" value={relationDecisionItems(relationPatches).length || "0"} />
           <Metric label="Render Issues" value={renderReview?.issue_count ?? renderReview?.issues?.length ?? "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
           <Metric label="Decisions" value={goldenDecisions.length || "0"} />
@@ -251,6 +266,7 @@ function App() {
         </section>
 
         <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} renderReview={renderReview} />
+        <RelationPatchPanel relationPatches={relationPatches} decisions={goldenDecisions} onDecide={upsertGoldenDecisionFor} />
         <ProviderSmokePanel
           imageDataUrl={semanticImageDataUrl}
           candidates={candidates}
@@ -365,6 +381,35 @@ function DiffPanel({ comparison, diffCount, renderReview }) {
           {!(renderReview.issues || []).length ? <Muted text="No render issues" /> : null}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function RelationPatchPanel({ relationPatches, decisions, onDecide }) {
+  const items = relationDecisionItems(relationPatches);
+  if (!items.length) return null;
+  return (
+    <section className="diffPanel">
+      <header>Relation Patches</header>
+      <div className="diffList">
+        {items.slice(0, 10).map((item) => {
+          const identity = relationPatchIdentity(item);
+          const current = decisions.find((decision) => sameDecisionTarget(decision, identity));
+          return (
+            <div className="diffItem relationPatchItem" key={`${identity.target_kind}:${identity.target_id}`}>
+              <strong>{item.label}</strong>
+              <span>{item.type || item.relation_type || "relation"}</span>
+              <span>{item.candidate_ids?.join(", ") || [item.from_id, item.to_id].filter(Boolean).join(" -> ")}</span>
+              <div className="relationPatchActions">
+                <button type="button" onClick={() => onDecide(identity, "accept", relationPatchDecisionPatch(item))}>Accept</button>
+                <button type="button" onClick={() => onDecide(identity, "reject")}>Reject</button>
+                <button type="button" onClick={() => onDecide(identity, "ignore")}>Ignore</button>
+              </div>
+              <span>{current?.decision || "none"}</span>
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -760,10 +805,40 @@ function getGoldenDecision(decisions, target, usingCandidates) {
 
 function decisionIdentityFor(target, usingCandidates) {
   const source = String(target.source || "");
-  if (source.includes("openai-vision-quarantined") || source.includes("openai-vision-rejected")) {
+  if (source.includes("openai-vision-quarantined") || source.includes("openai-vision-rejected") || source.includes("openai-relation-quarantined")) {
     return { target_kind: "proposal", target_id: target.proposal_id || stripTargetPrefix(target.id) };
   }
   return usingCandidates ? { target_kind: "candidate", target_id: target.id } : { target_kind: "node", target_id: target.id };
+}
+
+function relationDecisionItems(relationPatches) {
+  if (!relationPatches) return [];
+  const relationItems = (relationPatches.accepted_relation_patches || []).map((item) => ({
+    ...item,
+    label: item.patch_id || "relation",
+    decision_id: item.patch_id,
+    candidate_ids: item.candidate_ids || [item.from_id, item.to_id].filter(Boolean),
+  }));
+  const groupItems = (relationPatches.accepted_component_group_patches || []).map((item) => ({
+    ...item,
+    label: item.component_group_id || "component group",
+    decision_id: item.component_group_id,
+  }));
+  return [...relationItems, ...groupItems].filter((item) => item.decision_id);
+}
+
+function relationPatchIdentity(item) {
+  return { target_kind: "relation", target_id: stripTargetPrefix(item.decision_id || item.component_group_id || item.patch_id || "") };
+}
+
+function relationPatchDecisionPatch(item) {
+  const patch = {
+    candidate_ids: item.candidate_ids || [item.from_id, item.to_id].filter(Boolean),
+    component_group_id: item.component_group_id || item.patch_id || item.decision_id,
+    type: item.type,
+    reason: item.reason,
+  };
+  return compactDecision(patch);
 }
 
 function stripTargetPrefix(value) {

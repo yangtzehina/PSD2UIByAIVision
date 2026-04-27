@@ -87,6 +87,81 @@ class GoldenDecisionTests(unittest.TestCase):
             self.assertEqual(summary.edited, 1)
             self.assertEqual(summary.relation_accepted, 1)
 
+    def test_accept_relation_quarantined_proposal_creates_human_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "relation_quarantined.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "proposal_id": "rp1",
+                            "bbox": {"x": 4, "y": 5, "w": 20, "h": 10},
+                            "type": "Icon",
+                            "reason": "missing close icon in graph review",
+                            "related_candidate_ids": ["c1"],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            candidates, summary = apply_golden_decisions(
+                [Candidate(id="c1", bbox=BBox(0, 0, 10, 10), source="visual")],
+                [{"decision": "accept", "target_kind": "proposal", "target_id": "openai-relation-quarantined:rp1"}],
+                root,
+                width=100,
+                height=100,
+            )
+
+            self.assertEqual(len(candidates), 2)
+            self.assertEqual(candidates[-1].type_hint, "Icon")
+            self.assertEqual(candidates[-1].source_refs, ["openai-vision:rp1"])
+            self.assertEqual(summary.proposal_accepted, 1)
+
+    def test_accept_relation_patch_from_relation_patches_groups_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "relation_patches.json").write_text(
+                json.dumps(
+                    {
+                        "accepted_relation_patches": [
+                            {
+                                "patch_id": "rel1",
+                                "relation_type": "text_on_image",
+                                "from_id": "c2",
+                                "to_id": "c1",
+                                "reason": "text label belongs to button background",
+                            }
+                        ],
+                        "accepted_component_group_patches": [
+                            {
+                                "component_group_id": "group1",
+                                "type": "Button",
+                                "candidate_ids": ["c1", "c2"],
+                                "reason": "button group",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidates, summary = apply_golden_decisions(
+                [
+                    Candidate(id="c1", bbox=BBox(0, 0, 20, 10), source="visual"),
+                    Candidate(id="c2", bbox=BBox(2, 2, 8, 4), source="visual"),
+                ],
+                [
+                    {"decision": "accept", "target_kind": "relation", "target_id": "rel1"},
+                    {"decision": "accept", "target_kind": "relation", "target_id": "group1"},
+                ],
+                root,
+            )
+
+            self.assertEqual(summary.relation_accepted, 2)
+            self.assertEqual(candidates[0].metadata["openaiComponentGroupId"], "group1")
+            self.assertEqual(candidates[1].metadata["openaiComponentGroupId"], "group1")
+            self.assertEqual(len(candidates[0].metadata["goldenRelations"]), 2)
+
     def test_load_decisions_strips_sensitive_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "golden_decisions.json"

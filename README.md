@@ -182,6 +182,25 @@ uiir batch fixtures/game-ui-smoke --out out/game-ui-smoke --use-openai false
 uiir evaluate out/game-ui-smoke --report out/game-ui-smoke/metrics.json
 ```
 
+收尾阶段可以用一条命令把基础回归、Inspector 构建、`game-ui-smoke` baseline、Graph/Render/Focus/Fidelity 诊断、UIED adapter 对照、no-key OpenAI skip 和 tracked-file 敏感扫描固化成可审计报告：
+
+```bash
+uiir closeout --out out/closeout
+```
+
+真实 provider smoke 默认不会跑。确认本地环境变量已经设置后，再显式打开：
+
+```bash
+uiir closeout --out out/closeout-provider \
+  --provider-name third-party \
+  --api-key-env UIIR_PROVIDER_API_KEY \
+  --base-url "$UIIR_OPENAI_BASE_URL" \
+  --api-mode chat-completions \
+  --run-provider-smoke
+```
+
+`closeout_report.json` 和 `closeout_report.md` 会写入 `out/`，不提交仓库；报告只记录 `api_key_env`、`api_key_present` 和 `base_url_present`，不记录 token 或真实 base URL。需要扫描本地特定 provider 字符串时，可以追加 `--sensitive-pattern '<local-regex>'`，正则本身也不会写进报告。
+
 OpenAI 语义回归是独立 smoke，不进入普通 CI。它默认只跑 2 个 PSD，并比较本地 baseline 与 GPT-5.5 语义增强后的差异：
 
 ```bash
@@ -301,7 +320,7 @@ uiir fidelity out/game-ui-smoke/interface --probe-photoshopapi
 
 ## Quarantine-to-Golden 闭环
 
-`strict` 策略会把无本地几何证据的新视觉提案写入 `vision_quarantined.json`。人工确认后，可以把这些隔离提案沉淀成本地 golden：
+`strict` 策略会把无本地几何证据的新视觉提案写入 `vision_quarantined.json`。Graph-of-Mark relation review 还会写出 `relation_patches.json` 和 `relation_quarantined.json`；Inspector 可以把其中的 missing-region proposal 和 relation/component group patch 导出为 `golden_decisions.json`。人工确认后，可以把这些隔离提案沉淀成本地 golden：
 
 ```bash
 uiir golden build \
@@ -386,11 +405,11 @@ npm run dev
 - `candidates.json`
 - `layer_metadata.json`
 - 可选 `uiir.json`、`uiir.xml`、`comparison.json`
-- 可选 `vision_quarantined.json`、`vision_rejected.json`、`semantic_patches.json`
+- 可选 `vision_quarantined.json`、`vision_rejected.json`、`relation_patches.json`、`relation_quarantined.json`、`semantic_patches.json`
 
 也可以点击 `Load demo sample` 直接加载一个内置小样例，再用 `Provider Smoke` 面板填写第三方 OpenAI-compatible `Base URL`、`Token`、`Model` 和 `API mode`，从浏览器直接调用 provider 做语义测试。Token 只存在当前浏览器标签页内，不写入仓库、不写入导出的结果文件。因为这是浏览器直连，第三方接口必须允许 CORS；如果 provider 不允许网页跨域请求，需要改用本地 CLI 的 `uiir compare-openai`。
 
-检查器的 Review Filters 可以切换 `All / Local / GPT Accepted / GPT Quarantined / GPT Rejected / Semantic Patch`。选中节点时会显示视觉提案原因、隔离/拒绝原因、相关 candidate id 和语义补丁审计。`Golden Decision` 面板支持 Accept / Reject / Edit / Ignore，并导出 `golden_decisions.json`；原 `corrections.json` 导出仍保留用于快速修正单次输出。
+检查器的 Review Filters 可以切换 `All / Local / GPT Accepted / GPT Quarantined / GPT Rejected / Semantic Patch`。选中节点时会显示视觉提案原因、隔离/拒绝原因、相关 candidate id 和语义补丁审计。`Relation Patches` 面板可以对 relation/component group patch 做 Accept / Reject / Ignore，`Golden Decision` 面板支持对节点和 proposal 做 Accept / Reject / Edit / Ignore，并导出 `golden_decisions.json`；原 `corrections.json` 导出仍保留用于快速修正单次输出。
 
 如果 GitHub Pages 没有自动出现，请在仓库 `Settings -> Pages` 中把 source 设为 `GitHub Actions`，然后重新运行 `Deploy Inspector to GitHub Pages` workflow。
 
