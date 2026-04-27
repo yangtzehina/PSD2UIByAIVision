@@ -26,6 +26,11 @@ const semanticRules = [
   "Do not invent pixel coordinates.",
   "Return one item per useful candidate id when possible.",
   "Prefer PSD layer text over OCR guesses.",
+  "Do not return Screen for candidates; Screen is a synthetic root created by the program.",
+  "Do not downgrade a concrete local type to Unknown unless the local type is already Unknown.",
+  "Do not reclassify local Text candidates as Image, Container, or decorative controls.",
+  "Do not switch high-confidence concrete candidates across type families.",
+  "Only change Container into Button/Input/Toggle/Slider when component_group_id evidence is present.",
   "Use Unknown for ambiguous decorative elements.",
   "Use List/Grid/ScrollView only for repeated or scrollable regions.",
   "style may be empty unless a supplied text style is clearly useful.",
@@ -62,39 +67,71 @@ const openAISemanticsSchema = {
 
 function App() {
   const [imageUrl, setImageUrl] = useState("");
+  const [graphImageUrl, setGraphImageUrl] = useState("");
+  const [renderDiffImageUrl, setRenderDiffImageUrl] = useState("");
   const [semanticImageDataUrl, setSemanticImageDataUrl] = useState("");
   const [uiir, setUiir] = useState(null);
   const [baselineUiir, setBaselineUiir] = useState(null);
   const [comparison, setComparison] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [layers, setLayers] = useState([]);
+  const [visionQuarantined, setVisionQuarantined] = useState([]);
+  const [visionRejected, setVisionRejected] = useState([]);
+  const [relationPatches, setRelationPatches] = useState(null);
+  const [relationQuarantined, setRelationQuarantined] = useState([]);
+  const [semanticPatches, setSemanticPatches] = useState([]);
+  const [renderReview, setRenderReview] = useState(null);
   const [xml, setXml] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [corrections, setCorrections] = useState([]);
+  const [goldenDecisions, setGoldenDecisions] = useState([]);
   const [providerResult, setProviderResult] = useState(null);
   const [treeMode, setTreeMode] = useState("uiir");
+  const [boxFilter, setBoxFilter] = useState("all");
+  const [stageMode, setStageMode] = useState("box");
   const nodes = useMemo(() => flattenNodes(uiir?.root), [uiir]);
   const psdTree = useMemo(() => buildPsdTree(nodes), [nodes]);
   const baselineNodes = useMemo(() => flattenNodes(baselineUiir?.root), [baselineUiir]);
   const diffByNodeId = useMemo(() => buildNodeDiffs(baselineNodes, nodes), [baselineNodes, nodes]);
-  const usingCandidates = candidates.length > 0;
-  const boxes = usingCandidates ? candidates : nodes;
-  const selectedCandidate = candidates.find((item) => item.id === selectedId) || null;
+  const semanticPatchByCandidate = useMemo(() => groupSemanticPatches(semanticPatches), [semanticPatches]);
+  const enrichedCandidates = useMemo(() => enrichCandidates(candidates, semanticPatchByCandidate), [candidates, semanticPatchByCandidate]);
+  const rejectedBoxes = useMemo(() => rejectedProposalBoxes(visionRejected), [visionRejected]);
+  const relationQuarantinedBoxes = useMemo(() => proposalBoxes(relationQuarantined, "openai-relation-quarantined"), [relationQuarantined]);
+  const quarantinedBoxes = useMemo(
+    () => [...proposalBoxes(visionQuarantined, "openai-vision-quarantined"), ...relationQuarantinedBoxes],
+    [visionQuarantined, relationQuarantinedBoxes],
+  );
+  const usingCandidates = enrichedCandidates.length > 0;
+  const sourceBoxes = usingCandidates ? enrichedCandidates : nodes;
+  const boxes = useMemo(() => filterReviewBoxes(sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter), [sourceBoxes, rejectedBoxes, quarantinedBoxes, boxFilter]);
+  const selectedCandidate = boxes.find((item) => item.id === selectedId) || null;
   const selectedNode = nodes.find((item) => item.id === selectedId) || null;
   const selected = selectedCandidate || selectedNode;
   const selectedUsesCandidate = Boolean(selectedCandidate);
+  const selectedGoldenDecision = selected ? getGoldenDecision(goldenDecisions, selected, selectedUsesCandidate) : null;
+  const stageImageUrl = stageMode === "graph" ? graphImageUrl || imageUrl : stageMode === "render" ? renderDiffImageUrl || imageUrl : imageUrl;
+  const stageAlt = stageMode === "graph" ? "Graph overlay" : stageMode === "render" ? "Render diff" : "PSD composite";
 
   const loadDemo = () => {
     const demo = createDemoData();
     setImageUrl(demo.imageDataUrl);
+    setGraphImageUrl("");
+    setRenderDiffImageUrl("");
     setSemanticImageDataUrl(demo.imageDataUrl);
     setUiir(demo.uiir);
     setBaselineUiir(null);
     setComparison(null);
     setCandidates(demo.candidates);
     setLayers(demo.layers);
+    setVisionQuarantined([]);
+    setVisionRejected([]);
+    setRelationPatches(null);
+    setRelationQuarantined([]);
+    setSemanticPatches([]);
+    setRenderReview(null);
     setXml(demo.xml);
     setCorrections([]);
+    setGoldenDecisions([]);
     setSelectedId("");
     setProviderResult(null);
   };
@@ -126,6 +163,28 @@ function App() {
     setCorrections((items) => items.filter((item) => !sameTarget(item, identity)));
   };
 
+  const upsertGoldenDecision = (decision, includeEdits = false) => {
+    if (!selected) return;
+    const identity = decisionIdentityFor(selected, selectedUsesCandidate);
+    const correction = getCorrection(corrections, selected, selectedUsesCandidate);
+    const patch = includeEdits ? decisionOverrides(mergeTarget(selected, correction)) : {};
+    upsertGoldenDecisionFor(identity, decision, patch);
+  };
+
+  const upsertGoldenDecisionFor = (identity, decision, patch = {}) => {
+    setGoldenDecisions((items) => {
+      const index = items.findIndex((item) => item.target_kind === identity.target_kind && item.target_id === identity.target_id);
+      const next = [...items];
+      const value = compactDecision({ ...identity, decision, ...patch });
+      if (index >= 0) {
+        next[index] = value;
+      } else {
+        next.push(value);
+      }
+      return next;
+    });
+  };
+
   return (
     <main className="shell">
       <aside className="sidebar">
@@ -138,13 +197,22 @@ function App() {
         </div>
 
         <FileInput icon={<ImageIcon size={18} />} label="Composite/Overlay PNG" accept="image/*" onFile={readImage(setImageUrl, setSemanticImageDataUrl)} />
+        <FileInput icon={<ImageIcon size={18} />} label="graph_overlay.png" accept="image/*" onFile={readImage(setGraphImageUrl)} />
+        <FileInput icon={<ImageIcon size={18} />} label="render_diff.png" accept="image/*" onFile={readImage(setRenderDiffImageUrl)} />
         <FileInput icon={<FileJson size={18} />} label="uiir.json" accept=".json,application/json" onFile={readJson(setUiir)} />
         <FileInput icon={<FileJson size={18} />} label="baseline uiir.json" accept=".json,application/json" onFile={readJson(setBaselineUiir)} />
         <FileInput icon={<FileJson size={18} />} label="comparison.json" accept=".json,application/json" onFile={readJson(setComparison)} />
         <FileInput icon={<Boxes size={18} />} label="candidates.json" accept=".json,application/json" onFile={readJson(setCandidates)} />
         <FileInput icon={<Layers size={18} />} label="layer_metadata.json" accept=".json,application/json" onFile={readLayers(setLayers)} />
+        <FileInput icon={<FileJson size={18} />} label="vision_quarantined.json" accept=".json,application/json" onFile={readJson(setVisionQuarantined)} />
+        <FileInput icon={<FileJson size={18} />} label="vision_rejected.json" accept=".json,application/json" onFile={readJson(setVisionRejected)} />
+        <FileInput icon={<FileJson size={18} />} label="relation_patches.json" accept=".json,application/json" onFile={readJson(setRelationPatches)} />
+        <FileInput icon={<FileJson size={18} />} label="relation_quarantined.json" accept=".json,application/json" onFile={readJson(setRelationQuarantined)} />
+        <FileInput icon={<FileJson size={18} />} label="semantic_patches.json" accept=".json,application/json" onFile={readJson(setSemanticPatches)} />
+        <FileInput icon={<FileJson size={18} />} label="render_review.json" accept=".json,application/json" onFile={readJson(setRenderReview)} />
         <FileInput icon={<FileText size={18} />} label="uiir.xml" accept=".xml,text/xml" onFile={readText(setXml)} />
         <FileInput icon={<FileJson size={18} />} label="corrections.json" accept=".json,application/json" onFile={readCorrections(setCorrections)} />
+        <FileInput icon={<FileJson size={18} />} label="golden_decisions.json" accept=".json,application/json" onFile={readGoldenDecisions(setGoldenDecisions)} />
         <button className="demoButton" type="button" onClick={loadDemo}>
           <BrainCircuit size={18} />
           <span>Load demo sample</span>
@@ -155,11 +223,50 @@ function App() {
           <Metric label="Nodes" value={nodes.length || "0"} />
           <Metric label="Boxes" value={boxes.length || "0"} />
           <Metric label="Layers" value={layers.length || "0"} />
+          <Metric label="Quarantine" value={quarantinedBoxes.length || "0"} />
+          <Metric label="Rejected" value={rejectedBoxes.length || "0"} />
+          <Metric label="Relations" value={relationDecisionItems(relationPatches).length || "0"} />
+          <Metric label="Render Issues" value={renderReview?.issue_count ?? renderReview?.issues?.length ?? "0"} />
           <Metric label="Edits" value={corrections.length || "0"} />
+          <Metric label="Decisions" value={goldenDecisions.length || "0"} />
           <Metric label="Diffs" value={Object.keys(diffByNodeId).length || "0"} />
         </section>
 
-        <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} />
+        <section className="reviewFilters">
+          <header>Review View</header>
+          <div className="segmented vertical">
+            {[
+              ["box", "Box Overlay"],
+              ["graph", "Graph Overlay"],
+              ["render", "Render Diff"],
+            ].map(([value, label]) => (
+              <button key={value} className={stageMode === value ? "active" : ""} type="button" onClick={() => setStageMode(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="reviewFilters">
+          <header>Review Filter</header>
+          <div className="segmented vertical">
+            {[
+              ["all", "All"],
+              ["local", "Local"],
+              ["accepted", "GPT Accepted"],
+              ["quarantined", "GPT Quarantined"],
+              ["rejected", "GPT Rejected"],
+              ["semantic", "Semantic Patch"],
+            ].map(([value, label]) => (
+              <button key={value} className={boxFilter === value ? "active" : ""} type="button" onClick={() => setBoxFilter(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <DiffPanel comparison={comparison} diffCount={Object.keys(diffByNodeId).length} renderReview={renderReview} />
+        <RelationPatchPanel relationPatches={relationPatches} decisions={goldenDecisions} onDecide={upsertGoldenDecisionFor} />
         <ProviderSmokePanel
           imageDataUrl={semanticImageDataUrl}
           candidates={candidates}
@@ -177,14 +284,22 @@ function App() {
           onExport={() => exportCorrections(corrections)}
           correctionCount={corrections.length}
         />
+        <GoldenDecisionPanel
+          selected={selected}
+          usingCandidates={selectedUsesCandidate}
+          decision={selectedGoldenDecision}
+          onDecide={upsertGoldenDecision}
+          onExport={() => exportGoldenDecisions(goldenDecisions)}
+          decisionCount={goldenDecisions.length}
+        />
       </aside>
 
       <section className="workspace">
         <div className="stage">
-          {imageUrl ? (
+          {stageImageUrl ? (
             <div className="imageWrap">
-              <img src={imageUrl} alt="PSD composite" />
-              {boxes.map((box, index) => {
+              <img src={stageImageUrl} alt={stageAlt} />
+              {stageMode === "box" ? boxes.map((box, index) => {
                 const correction = getCorrection(corrections, box, usingCandidates);
                 return (
                   <OverlayBox
@@ -198,7 +313,7 @@ function App() {
                     onClick={() => setSelectedId(box.id || "")}
                   />
                 );
-              })}
+              }) : null}
             </div>
           ) : (
             <div className="empty">
@@ -229,8 +344,8 @@ function App() {
   );
 }
 
-function DiffPanel({ comparison, diffCount }) {
-  if (!comparison && !diffCount) return null;
+function DiffPanel({ comparison, diffCount, renderReview }) {
+  if (!comparison && !diffCount && !renderReview) return null;
   return (
     <section className="diffPanel">
       <header>OpenAI Diff</header>
@@ -252,6 +367,48 @@ function DiffPanel({ comparison, diffCount }) {
           </div>
         ))}
         {!comparison ? <Muted text="Load comparison.json" /> : null}
+      </div>
+      {renderReview ? (
+        <div className="renderIssues">
+          <strong>Render Review</strong>
+          {(renderReview.issues || []).slice(0, 6).map((issue) => (
+            <div className="diffItem" key={issue.id || `${issue.type}-${issue.reason}`}>
+              <strong>{issue.type || "issue"}</strong>
+              <span>{issue.severity || "n/a"}</span>
+              <span>{issue.reason || ""}</span>
+            </div>
+          ))}
+          {!(renderReview.issues || []).length ? <Muted text="No render issues" /> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RelationPatchPanel({ relationPatches, decisions, onDecide }) {
+  const items = relationDecisionItems(relationPatches);
+  if (!items.length) return null;
+  return (
+    <section className="diffPanel">
+      <header>Relation Patches</header>
+      <div className="diffList">
+        {items.slice(0, 10).map((item) => {
+          const identity = relationPatchIdentity(item);
+          const current = decisions.find((decision) => sameDecisionTarget(decision, identity));
+          return (
+            <div className="diffItem relationPatchItem" key={`${identity.target_kind}:${identity.target_id}`}>
+              <strong>{item.label}</strong>
+              <span>{item.type || item.relation_type || "relation"}</span>
+              <span>{item.candidate_ids?.join(", ") || [item.from_id, item.to_id].filter(Boolean).join(" -> ")}</span>
+              <div className="relationPatchActions">
+                <button type="button" onClick={() => onDecide(identity, "accept", relationPatchDecisionPatch(item))}>Accept</button>
+                <button type="button" onClick={() => onDecide(identity, "reject")}>Reject</button>
+                <button type="button" onClick={() => onDecide(identity, "ignore")}>Ignore</button>
+              </div>
+              <span>{current?.decision || "none"}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -454,9 +611,47 @@ function CorrectionEditor({ selected, usingCandidates, correction, onChange, onR
   );
 }
 
+function GoldenDecisionPanel({ selected, usingCandidates, decision, onDecide, onExport, decisionCount }) {
+  const canDecide = Boolean(selected);
+  const identity = selected ? decisionIdentityFor(selected, usingCandidates) : null;
+  return (
+    <section className="decisionPanel">
+      <header>
+        <span>Golden Decision</span>
+        <button type="button" onClick={onExport} disabled={!decisionCount} title="Export golden_decisions.json">
+          <Save size={16} />
+        </button>
+      </header>
+      {selected ? (
+        <>
+          <div className="decisionTarget">
+            <span>{identity.target_kind}</span>
+            <strong>{identity.target_id}</strong>
+          </div>
+          <div className="decisionActions">
+            <button type="button" onClick={() => onDecide("accept")} disabled={!canDecide}>Accept</button>
+            <button type="button" onClick={() => onDecide("reject")} disabled={!canDecide}>Reject</button>
+            <button type="button" onClick={() => onDecide("edit", true)} disabled={!canDecide}>Edit</button>
+            <button type="button" onClick={() => onDecide("ignore")} disabled={!canDecide}>Ignore</button>
+          </div>
+          <div className="decisionStatus">
+            <span>Current</span>
+            <strong>{decision?.decision || "none"}</strong>
+          </div>
+        </>
+      ) : (
+        <Muted text="Select a quarantined proposal or node" />
+      )}
+    </section>
+  );
+}
+
 function NodeDetails({ node }) {
   const metadata = node.metadata || {};
   const refs = node.sourceRefs || node.source_refs || [];
+  const rejected = metadata.openaiRejected || [];
+  const semanticPatches = metadata.openaiSemanticPatches || metadata.externalSemanticPatches || [];
+  const related = metadata.relatedCandidateIds || metadata.related_candidate_ids || [];
   return (
     <div className="nodeDetails">
       <div>
@@ -470,6 +665,26 @@ function NodeDetails({ node }) {
       <div>
         <span>Grouping</span>
         <strong>{metadata.groupingReason || (metadata.component ? "component" : "n/a")}</strong>
+      </div>
+      <div>
+        <span>Proposal</span>
+        <strong>{metadata.proposalReason || metadata.openaiVisionProposal?.reason || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Rejected</span>
+        <strong>{metadata.rejectionReason || metadata.quarantineReason || rejected.map((item) => item.reason).filter(Boolean).join(", ") || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Related</span>
+        <strong>{related.join(", ") || "n/a"}</strong>
+      </div>
+      <div>
+        <span>Semantic</span>
+        <strong>{semanticPatches.length ? `${semanticPatches.length} patch` : "n/a"}</strong>
+      </div>
+      <div>
+        <span>Decision</span>
+        <strong>{metadata.goldenDecision?.decision || "n/a"}</strong>
       </div>
     </div>
   );
@@ -572,10 +787,63 @@ function sameTarget(left, right) {
   return (left.candidate_id && left.candidate_id === right.candidate_id) || (left.node_id && left.node_id === right.node_id);
 }
 
+function sameDecisionTarget(left, right) {
+  return left.target_kind === right.target_kind && left.target_id === right.target_id;
+}
+
 function getCorrection(corrections, target, usingCandidates) {
   if (!target) return null;
   const key = usingCandidates ? "candidate_id" : "node_id";
   return corrections.find((item) => item[key] === target.id) || null;
+}
+
+function getGoldenDecision(decisions, target, usingCandidates) {
+  if (!target) return null;
+  const identity = decisionIdentityFor(target, usingCandidates);
+  return decisions.find((item) => sameDecisionTarget(item, identity)) || null;
+}
+
+function decisionIdentityFor(target, usingCandidates) {
+  const source = String(target.source || "");
+  if (source.includes("openai-vision-quarantined") || source.includes("openai-vision-rejected") || source.includes("openai-relation-quarantined")) {
+    return { target_kind: "proposal", target_id: target.proposal_id || stripTargetPrefix(target.id) };
+  }
+  return usingCandidates ? { target_kind: "candidate", target_id: target.id } : { target_kind: "node", target_id: target.id };
+}
+
+function relationDecisionItems(relationPatches) {
+  if (!relationPatches) return [];
+  const relationItems = (relationPatches.accepted_relation_patches || []).map((item) => ({
+    ...item,
+    label: item.patch_id || "relation",
+    decision_id: item.patch_id,
+    candidate_ids: item.candidate_ids || [item.from_id, item.to_id].filter(Boolean),
+  }));
+  const groupItems = (relationPatches.accepted_component_group_patches || []).map((item) => ({
+    ...item,
+    label: item.component_group_id || "component group",
+    decision_id: item.component_group_id,
+  }));
+  return [...relationItems, ...groupItems].filter((item) => item.decision_id);
+}
+
+function relationPatchIdentity(item) {
+  return { target_kind: "relation", target_id: stripTargetPrefix(item.decision_id || item.component_group_id || item.patch_id || "") };
+}
+
+function relationPatchDecisionPatch(item) {
+  const patch = {
+    candidate_ids: item.candidate_ids || [item.from_id, item.to_id].filter(Boolean),
+    component_group_id: item.component_group_id || item.patch_id || item.decision_id,
+    type: item.type,
+    reason: item.reason,
+  };
+  return compactDecision(patch);
+}
+
+function stripTargetPrefix(value) {
+  const text = String(value || "");
+  return text.includes(":") ? text.split(":").pop() : text;
 }
 
 function mergeTarget(target, correction) {
@@ -594,6 +862,25 @@ function mergeTarget(target, correction) {
     ignored: false,
     ...correction,
   };
+}
+
+function decisionOverrides(target) {
+  const fields = {};
+  for (const key of ["bbox", "type", "role", "text", "style", "layout", "parent_id"]) {
+    if (target[key] !== "" && target[key] !== null && target[key] !== undefined) {
+      fields[key] = target[key];
+    }
+  }
+  return fields;
+}
+
+function compactDecision(item) {
+  const compacted = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (value === "" || value === null || value === undefined) continue;
+    compacted[key] = value;
+  }
+  return compacted;
 }
 
 function compactCorrection(item) {
@@ -624,6 +911,78 @@ function flattenNodes(root) {
   };
   visit(root);
   return result;
+}
+
+function groupSemanticPatches(patches) {
+  const grouped = {};
+  const items = Array.isArray(patches) ? patches : patches?.items || patches?.patches || [];
+  for (const patch of items) {
+    if (!patch?.candidate_id) continue;
+    grouped[patch.candidate_id] = [...(grouped[patch.candidate_id] || []), patch];
+  }
+  return grouped;
+}
+
+function enrichCandidates(candidates, semanticPatchByCandidate) {
+  return candidates.map((candidate) => {
+    const externalSemanticPatches = semanticPatchByCandidate[candidate.id] || [];
+    if (!externalSemanticPatches.length) return candidate;
+    return {
+      ...candidate,
+      metadata: {
+        ...(candidate.metadata || {}),
+        externalSemanticPatches,
+      },
+    };
+  });
+}
+
+function rejectedProposalBoxes(rejected) {
+  return proposalBoxes(rejected, "openai-vision-rejected");
+}
+
+function proposalBoxes(proposals, source) {
+  const items = Array.isArray(proposals) ? proposals : proposals?.items || [];
+  return items.map((item, index) => {
+    const proposalId = item.proposal_id || `r${index + 1}`;
+    return {
+      id: `${source}:${proposalId}`,
+      proposal_id: proposalId,
+      target_kind: "proposal",
+      type_hint: item.type || "Unknown",
+      bbox: item.bbox,
+      source,
+      source_refs: [`${source}:${proposalId}`],
+      role: item.role || "",
+      text: item.text || "",
+      metadata: {
+        rejectionReason: item.rejectionReason || item.rejection_reason || "",
+        quarantineReason: item.quarantineReason || item.quarantine_reason || "",
+        proposalReason: item.reason || "",
+        goldenDecision: item.goldenDecision || null,
+        relatedCandidateIds: item.related_candidate_ids || [],
+      },
+    };
+  });
+}
+
+function filterReviewBoxes(sourceBoxes, rejectedBoxes, quarantinedBoxes, filter) {
+  if (filter === "rejected") return rejectedBoxes;
+  if (filter === "quarantined") return quarantinedBoxes;
+  if (filter === "local") return sourceBoxes.filter((box) => !isGptAcceptedBox(box) && !hasSemanticPatch(box));
+  if (filter === "accepted") return sourceBoxes.filter(isGptAcceptedBox);
+  if (filter === "semantic") return sourceBoxes.filter(hasSemanticPatch);
+  return sourceBoxes;
+}
+
+function isGptAcceptedBox(box) {
+  const metadata = box.metadata || {};
+  return box.source === "openai-vision-proposal" || Boolean(metadata.openaiVision?.accepted) || Boolean(metadata.openaiVisionProposals?.length);
+}
+
+function hasSemanticPatch(box) {
+  const metadata = box.metadata || {};
+  return Boolean(metadata.openaiSemanticPatches?.length || metadata.externalSemanticPatches?.length || metadata.openaiRejected?.length);
 }
 
 function buildPsdTree(nodes) {
@@ -690,6 +1049,13 @@ function readCorrections(setter) {
   };
 }
 
+function readGoldenDecisions(setter) {
+  return async (file) => {
+    const parsed = JSON.parse(await file.text());
+    setter(Array.isArray(parsed) ? parsed : parsed.decisions || []);
+  };
+}
+
 function readText(setter) {
   return async (file) => setter(await file.text());
 }
@@ -713,10 +1079,20 @@ function exportCorrections(corrections) {
   URL.revokeObjectURL(url);
 }
 
+function exportGoldenDecisions(decisions) {
+  const payload = JSON.stringify({ version: "0.1", decisions }, null, 2);
+  const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "golden_decisions.json";
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 async function runProviderSemanticSmoke({ baseUrl, token, model, apiMode, detail, imageDataUrl, candidates, layers }) {
   const payload = {
     task: "Classify PSD UI candidates and refine UI semantic hints.",
-    prompt_version: "browser_smoke",
+    prompt_version: "semantic_v2_browser_smoke",
     rules: semanticRules,
     candidates: candidates.slice(0, 220).map(candidateSummary),
     layers: layers.slice(0, 260).map(layerSummary),

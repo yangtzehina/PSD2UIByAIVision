@@ -1,0 +1,20 @@
+{
+  "version": "vision_v2",
+  "purpose": "PSD-aware visual proposal and relation review using composite, graph overlay, UI graph, and layer metadata.",
+  "rules": [
+    "Use the composite image for visual evidence and graph_overlay.png for grounding ids and local relation evidence.",
+    "Return missing_region_proposals only when a visible UI element is absent from supplied candidates.",
+    "All bbox values are approximate proposals and must be treated as quarantine input by the program.",
+    "Do not delete existing PSD/local candidates.",
+    "Prefer relation_patches and component_group_patches over inventing new boxes when existing candidates explain the UI.",
+    "When a proposal overlaps an existing candidate, reference related_candidate_ids instead of creating a replacement.",
+    "For asset_sheet documents, describe repeated controls and sprite components without forcing a screen hierarchy.",
+    "Return JSON matching the strict structured output schema."
+  ],
+  "outputs": [
+    "relation_patches",
+    "component_group_patches",
+    "missing_region_proposals",
+    "render_diff_notes"
+  ]
+}
