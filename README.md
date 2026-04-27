@@ -254,7 +254,17 @@ uiir compare-openai fixtures/openai-smoke --out out/graph-vision-smoke \
   --vision-policy strict \
   --graph-overlay \
   --render-review \
+  --focus-tiles \
+  --parser-fidelity \
   --curation-report
+```
+
+如果 `--prompts relation_v1` 或 `--prompt-version relation_v1`，OpenAI 分支会在普通语义增强后额外执行 Graph-of-Mark relation review。模型输出只会写入 `relation_patches.json`、`relation_quarantined.json` 和候选 metadata，不会改写 `uiir.xml` 或已有 bbox。
+
+渲染审查后的高风险区域可以裁成局部 tile，方便后续 tile 级视觉审查：
+
+```bash
+uiir focus build out/game-ui-smoke/interface --out out/game-ui-smoke/interface
 ```
 
 主动学习采样会把 quarantine 多、prompt/policy 分歧大、golden 指标低、关系图复杂、render issue 多的样本排到前面，减少人工确认成本：
@@ -263,7 +273,31 @@ uiir compare-openai fixtures/openai-smoke --out out/graph-vision-smoke \
 uiir curate out/graph-vision-smoke --golden goldens/local --out out/curation
 ```
 
-新增产物包括 `ui_graph.json`、`graph_overlay.png`、`render_review.json`、`render_diff.png`、`curation_queue.json` 和 `curation_queue.md`。`leaderboard` 现在也会记录 `relation_precision`、`relation_recall`、`component_group_f1`、`render_review_issue_count` 和 `curation_value_score`。
+新增产物包括 `ui_graph.json`、`graph_overlay.png`、`render_review.json`、`render_diff.png`、`focus_tiles.json`、`relation_patches.json`、`parser_fidelity.json`、`curation_queue.json` 和 `curation_queue.md`。`leaderboard` 现在也会记录 `relation_precision`、`relation_recall`、`component_group_f1`、relation patch 数、focus tile 数、`render_review_issue_count` 和 `curation_value_score`。
+
+## 并行探索命令
+
+本地视觉 adapter 对照不会默认下载任何模型权重。`uied` 是轻量 OpenCV/UIED-style baseline；OmniParser、SAM、PaddleOCR 只写 skipped manifest，方便后续本地接权重：
+
+```bash
+uiir adapter list
+uiir adapter run out/game-ui-smoke/interface --adapter uied --out out/adapter-uied/interface
+uiir adapter run out/game-ui-smoke/interface --adapter omniparser --out out/adapter-omniparser/interface
+```
+
+Rico importer 只导入本地已有 screenshot + view hierarchy，不下载数据集，输出临时 UIIR golden：
+
+```bash
+uiir dataset rico-import /path/to/rico-local --out out/rico-import --limit 20
+uiir evaluate out/rico-import/goldens --golden out/rico-import/goldens --report out/rico-import/metrics.json
+```
+
+Parser fidelity 报告用于衡量 psd-tools 提取覆盖率，并可选探测 PhotoshopAPI 是否本地可用：
+
+```bash
+uiir fidelity out/game-ui-smoke/interface --out out/game-ui-smoke/interface
+uiir fidelity out/game-ui-smoke/interface --probe-photoshopapi
+```
 
 ## Quarantine-to-Golden 闭环
 

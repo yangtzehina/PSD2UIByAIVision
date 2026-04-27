@@ -12,7 +12,10 @@ from typing import Any
 from .batch import _find_psd_files
 from .curate import curate_run
 from .evaluate import evaluate_outputs
+from .fidelity import build_parser_fidelity_report
+from .focus import build_focus_tiles
 from .graph import build_ui_graph
+from .openai_relations import review_relations_with_openai
 from .pipeline import ExtractOptions, run_extract
 from .provider import LLMProviderConfig, missing_api_key_reason, provider_summary, resolve_api_key
 from .render_review import review_render
@@ -44,6 +47,8 @@ class CompareOptions:
     graph_overlay: bool = False
     render_review: bool = False
     curation_report: bool = False
+    focus_tiles: bool = False
+    parser_fidelity: bool = False
 
 
 @dataclass
@@ -66,6 +71,8 @@ class IterateOptions:
     graph_overlay: bool = False
     render_review: bool = False
     curation_report: bool = False
+    focus_tiles: bool = False
+    parser_fidelity: bool = False
 
 
 def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: CompareOptions) -> dict[str, Any]:
@@ -98,6 +105,8 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
             "graph_overlay": options.graph_overlay,
             "render_review": options.render_review,
             "curation_report": options.curation_report,
+            "focus_tiles": options.focus_tiles,
+            "parser_fidelity": options.parser_fidelity,
             "provider": provider_info,
             "created_at": _now(),
         }
@@ -133,6 +142,8 @@ def run_compare_openai(input_dir: str | Path, output_dir: str | Path, options: C
         "graph_overlay": options.graph_overlay,
         "render_review": options.render_review,
         "curation_report": options.curation_report,
+        "focus_tiles": options.focus_tiles,
+        "parser_fidelity": options.parser_fidelity,
         "provider": provider_info,
         "input": Path(input_dir).expanduser().resolve().as_posix(),
         "output": out_dir.as_posix(),
@@ -173,6 +184,8 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
             "graph_overlay": options.graph_overlay,
             "render_review": options.render_review,
             "curation_report": options.curation_report,
+            "focus_tiles": options.focus_tiles,
+            "parser_fidelity": options.parser_fidelity,
             "provider": provider_info,
             "created_at": _now(),
             "runs": [],
@@ -211,6 +224,8 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
                     graph_overlay=options.graph_overlay,
                     render_review=options.render_review,
                     curation_report=False,
+                    focus_tiles=options.focus_tiles,
+                    parser_fidelity=options.parser_fidelity,
                 ),
             )
             seconds = round(time.perf_counter() - started, 3)
@@ -231,6 +246,8 @@ def run_iterate_openai(input_dir: str | Path, output_dir: str | Path, options: I
         "graph_overlay": options.graph_overlay,
         "render_review": options.render_review,
         "curation_report": options.curation_report,
+        "focus_tiles": options.focus_tiles,
+        "parser_fidelity": options.parser_fidelity,
         "provider": provider_info,
         "runs": runs,
     }
@@ -276,6 +293,7 @@ def review_run(run_dir: str | Path) -> dict[str, Any]:
 
 
 def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_openai: bool) -> dict[str, Any]:
+    semantic_prompt_version = "semantic_v3" if options.prompt_version.startswith("relation") else options.prompt_version
     artifacts = run_extract(
         psd_path,
         output_dir,
@@ -287,7 +305,7 @@ def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_
             model=options.model,
             detail=options.detail,
             openai_audit=use_openai,
-            prompt_version=options.prompt_version,
+            prompt_version=semantic_prompt_version,
             provider_name=options.provider_name,
             api_key_env=options.api_key_env,
             base_url=options.base_url,
@@ -301,13 +319,38 @@ def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_
     graph_json = None
     graph_overlay = None
     render_review_json = None
-    if options.graph_overlay:
+    focus_tiles_json = None
+    parser_fidelity_json = None
+    relation_patches_json = None
+    should_build_graph = options.graph_overlay or (use_openai and options.prompt_version.startswith("relation"))
+    if should_build_graph:
         graph_result = build_ui_graph(output_dir)
         graph_json = graph_result.graph_json.as_posix()
         graph_overlay = graph_result.graph_overlay.as_posix()
-    if options.render_review:
+    if options.render_review or options.focus_tiles:
         render_report = review_render(output_dir)
         render_review_json = (output_dir / "render_review.json").as_posix() if render_report else None
+    if options.focus_tiles:
+        focus_report = build_focus_tiles(output_dir)
+        focus_tiles_json = (output_dir / "focus_tiles.json").as_posix() if focus_report else None
+    if options.parser_fidelity:
+        fidelity_report = build_parser_fidelity_report(output_dir)
+        parser_fidelity_json = (output_dir / "parser_fidelity.json").as_posix() if fidelity_report else None
+    if use_openai and options.prompt_version.startswith("relation"):
+        provider = LLMProviderConfig(
+            provider_name=options.provider_name,
+            api_key_env=options.api_key_env,
+            base_url=options.base_url,
+            api_mode=options.api_mode,
+        )
+        review_relations_with_openai(
+            output_dir,
+            model=options.model,
+            detail=options.detail,
+            prompt_version=options.prompt_version,
+            provider=provider,
+        )
+        relation_patches_json = (output_dir / "relation_patches.json").as_posix()
     return {
         "source": psd_path.as_posix(),
         "name": output_dir.name,
@@ -317,6 +360,9 @@ def _extract_one(psd_path: Path, output_dir: Path, options: CompareOptions, use_
         "ui_graph_json": graph_json,
         "graph_overlay": graph_overlay,
         "render_review_json": render_review_json,
+        "focus_tiles_json": focus_tiles_json,
+        "parser_fidelity_json": parser_fidelity_json,
+        "relation_patches_json": relation_patches_json,
     }
 
 
@@ -346,6 +392,9 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
     vision_counts = _vision_counts(refined["output_dir"], refined_candidates)
     graph_counts = _graph_counts(refined["output_dir"])
     render_counts = _render_review_counts(refined["output_dir"])
+    focus_counts = _focus_tile_counts(refined["output_dir"])
+    fidelity_counts = _parser_fidelity_counts(refined["output_dir"])
+    relation_patch_counts = _relation_patch_counts(refined["output_dir"])
     baseline_visual = _metric_item(base["output_dir"])
     openai_visual = _metric_item(refined["output_dir"])
     base_pixel = baseline_visual.get("visual", {}).get("pixel_similarity")
@@ -384,8 +433,14 @@ def _compare_pair(base: dict[str, Any], refined: dict[str, Any]) -> dict[str, An
         "quarantined_proposals": vision_counts.get("quarantined_proposals", 0),
         "graph": graph_counts,
         "relation_count": graph_counts.get("edge_count", 0),
+        "relation_patches": relation_patch_counts,
+        "accepted_relation_patches": relation_patch_counts.get("accepted_relation_patches", 0),
+        "accepted_component_group_patches": relation_patch_counts.get("accepted_component_group_patches", 0),
         "render_review": render_counts,
         "render_review_issue_count": render_counts.get("issue_count", 0),
+        "focus_tiles": focus_counts,
+        "focus_tile_count": focus_counts.get("tile_count", 0),
+        "parser_fidelity": fidelity_counts,
         "baseline_golden": baseline_visual.get("golden"),
         "openai_golden": openai_visual.get("golden"),
     }
@@ -483,6 +538,61 @@ def _render_review_counts(output_dir: str | Path) -> dict[str, Any]:
     }
 
 
+def _focus_tile_counts(output_dir: str | Path) -> dict[str, Any]:
+    focus_path = Path(output_dir) / "focus_tiles.json"
+    if not focus_path.exists():
+        return {"tile_count": 0}
+    report = _load_json(focus_path)
+    return {
+        "path": focus_path.as_posix(),
+        "status": report.get("status"),
+        "tile_count": report.get("tile_count", len(report.get("tiles", []) or [])),
+        "eligible_issue_count": report.get("eligible_issue_count", 0),
+        "truncated": bool(report.get("truncated")),
+    }
+
+
+def _parser_fidelity_counts(output_dir: str | Path) -> dict[str, Any]:
+    fidelity_path = Path(output_dir) / "parser_fidelity.json"
+    if not fidelity_path.exists():
+        return {}
+    report = _load_json(fidelity_path)
+    counts = report.get("counts", {}) or {}
+    coverage = report.get("psd_tools_coverage", {}) or {}
+    return {
+        "path": fidelity_path.as_posix(),
+        "layers": counts.get("layers", 0),
+        "text_layers": counts.get("text_layers", 0),
+        "smart_object_ish_layers": counts.get("smart_object_ish_layers", 0),
+        "layer_effects": counts.get("layer_effects", 0),
+        "warnings": counts.get("warnings", 0),
+        "candidate_layer_coverage": coverage.get("candidate_layer_coverage"),
+        "asset_coverage": coverage.get("asset_coverage"),
+    }
+
+
+def _relation_patch_counts(output_dir: str | Path) -> dict[str, Any]:
+    relation_path = Path(output_dir) / "relation_patches.json"
+    if not relation_path.exists():
+        return {
+            "accepted_relation_patches": 0,
+            "accepted_component_group_patches": 0,
+            "quarantined_proposals": 0,
+            "render_diff_notes": 0,
+        }
+    report = _load_json(relation_path)
+    summary = report.get("summary", {}) or {}
+    return {
+        "path": relation_path.as_posix(),
+        "accepted_relation_patches": summary.get("accepted_relation_patches", 0),
+        "rejected_relation_patches": summary.get("rejected_relation_patches", 0),
+        "accepted_component_group_patches": summary.get("accepted_component_group_patches", 0),
+        "rejected_component_group_patches": summary.get("rejected_component_group_patches", 0),
+        "quarantined_proposals": summary.get("quarantined_proposals", 0),
+        "render_diff_notes": summary.get("render_diff_notes", 0),
+    }
+
+
 def _invalid_parent_hints(candidates: list[dict[str, Any]]) -> int:
     ids = {candidate.get("id") for candidate in candidates}
     layer_refs = {ref for candidate in candidates for ref in candidate.get("source_refs", []) if isinstance(ref, str) and ref.startswith("layer:")}
@@ -547,6 +657,9 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
     quarantined = sum(item.get("quarantined_proposals", 0) or 0 for item in items)
     render_issues = sum(item.get("render_review_issue_count", 0) or 0 for item in items)
     relation_count = sum(item.get("relation_count", 0) or 0 for item in items)
+    accepted_relation_patches = sum(item.get("accepted_relation_patches", 0) or 0 for item in items)
+    accepted_component_group_patches = sum(item.get("accepted_component_group_patches", 0) or 0 for item in items)
+    focus_tile_count = sum(item.get("focus_tile_count", 0) or 0 for item in items)
     semantic_gain = sum(
         max(0.0, item.get("role_fill_delta") or 0.0)
         + max(0.0, item.get("layout_fill_delta") or 0.0)
@@ -566,10 +679,10 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
     score += 10 * float(report.get("openai", {}).get("avg_proposal_recall") or 0.0)
     score += 5 * float(report.get("openai", {}).get("avg_relation_f1") or 0.0)
     score += 5 * float(report.get("openai", {}).get("avg_component_group_f1") or 0.0)
-    score += min(8, quarantined * 0.5 + relation_count * 0.03)
+    score += min(10, quarantined * 0.5 + relation_count * 0.03 + accepted_relation_patches + accepted_component_group_patches)
     score -= type_changes
     score -= render_issues * 0.5
-    curation_value_score = round(quarantined * 4 + render_issues * 5 + type_changes * 2 + relation_count * 0.02, 5)
+    curation_value_score = round(quarantined * 4 + render_issues * 5 + type_changes * 2 + relation_count * 0.02 + focus_tile_count, 5)
     return {
         "prompt_version": prompt_version or report.get("prompt_version"),
         "policy": policy,
@@ -598,6 +711,9 @@ def _leaderboard_entry(policy: str, run_dir: Path, report: dict[str, Any], promp
         "quarantined_proposals": quarantined,
         "render_review_issue_count": render_issues,
         "relation_count": relation_count,
+        "accepted_relation_patches": accepted_relation_patches,
+        "accepted_component_group_patches": accepted_component_group_patches,
+        "focus_tile_count": focus_tile_count,
         "curation_value_score": curation_value_score,
     }
 
@@ -614,6 +730,8 @@ def _leaderboard_sort_key(entry: dict[str, Any]) -> tuple:
         float(entry.get("avg_component_group_f1") or 0.0),
         -int(entry.get("type_changes") or 0),
         -int(entry.get("render_review_issue_count") or 0),
+        int(entry.get("accepted_relation_patches") or 0),
+        int(entry.get("accepted_component_group_patches") or 0),
         float(entry.get("score") or 0),
     )
 
@@ -629,8 +747,8 @@ def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
         f"- model: {report.get('model')}",
         f"- prompt_version: {report.get('prompt_version')}",
         "",
-        "| prompt | policy | score | pixel | type F1 | relation F1 | proposal recall | gate | type changes | quarantined | render issues |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |",
+        "| prompt | policy | score | pixel | type F1 | relation F1 | proposal recall | gate | type changes | quarantined | relation patches | focus tiles | render issues |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for run in report.get("runs", []) or []:
         gate = (
@@ -644,7 +762,8 @@ def _write_leaderboard(out_dir: Path, report: dict[str, Any]) -> None:
         lines.append(
             f"| {run.get('prompt_version')} | {run.get('policy')} | {run.get('score')} | {run.get('openai_pixel_similarity')} | "
             f"{run.get('avg_type_f1')} | {run.get('avg_relation_f1')} | {run.get('avg_proposal_recall')} | {gate} | "
-            f"{run.get('type_changes')} | {run.get('quarantined_proposals')} | {run.get('render_review_issue_count')} |"
+            f"{run.get('type_changes')} | {run.get('quarantined_proposals')} | {run.get('accepted_relation_patches')} | "
+            f"{run.get('focus_tile_count')} | {run.get('render_review_issue_count')} |"
         )
     (out_dir / "leaderboard.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -683,6 +802,8 @@ def _write_experiment_manifest(
         "graph_overlay": options.graph_overlay,
         "render_review": options.render_review,
         "curation_report": options.curation_report,
+        "focus_tiles": options.focus_tiles,
+        "parser_fidelity": options.parser_fidelity,
         "api_key_env": provider.api_key_env,
         "api_key_present": bool(resolve_api_key(provider)),
         "base_url_present": bool(provider.base_url),
@@ -726,6 +847,8 @@ def _write_summary(out_dir: Path, report: dict[str, Any]) -> None:
             f"vision_quarantined={vision.get('quarantined_proposals', 0)}, "
             f"semantic_rejected={semantic.get('rejected', 0)}, "
             f"graph_edges={item.get('relation_count', 0)}, "
+            f"relation_patches={item.get('accepted_relation_patches', 0)}, "
+            f"focus_tiles={item.get('focus_tile_count', 0)}, "
             f"render_issues={item.get('render_review_issue_count', 0)}"
         )
     (out_dir / "regression_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

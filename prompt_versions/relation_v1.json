@@ -1,0 +1,66 @@
+{
+  "version": "relation_v1",
+  "purpose": "Graph-of-Mark relation review for PSD-to-UIIR outputs.",
+  "inputs": [
+    "composite image",
+    "graph_overlay.png with candidate ids and graph edges",
+    "ui_graph.json nodes and edges",
+    "optional render diff report"
+  ],
+  "rules": [
+    "Use only supplied graph node ids and candidate ids.",
+    "Confirm or reject existing graph evidence with relation_patches instead of regenerating the UI tree.",
+    "Use component_group_patches when existing candidates together form one runtime UI component.",
+    "Do not propose direct bbox edits to existing candidates or UIIR nodes.",
+    "Return missing_region_proposals only for visible UI regions absent from the graph; the program will quarantine these records for review.",
+    "Use render_diff_notes for visual discrepancies between the reference and replay render.",
+    "Return JSON matching the strict structured output contract."
+  ],
+  "outputs": [
+    "relation_patches",
+    "component_group_patches",
+    "missing_region_proposals",
+    "render_diff_notes"
+  ],
+  "output_contract": {
+    "relation_patches": [
+      {
+        "patch_id": "string",
+        "action": "accept or reject",
+        "edge_id": "string, empty when no exact graph edge is being reviewed",
+        "relation_type": "string",
+        "from_id": "string",
+        "to_id": "string",
+        "confidence": "number from 0 to 1",
+        "reason": "string"
+      }
+    ],
+    "component_group_patches": [
+      {
+        "component_group_id": "string",
+        "type": "Button, Input, Toggle, Slider, Container, List, Grid, ScrollView, or Unknown",
+        "candidate_ids": ["string"],
+        "confidence": "number from 0 to 1",
+        "reason": "string"
+      }
+    ],
+    "missing_region_proposals": [
+      {
+        "proposal_id": "string",
+        "bbox": {"x": 0, "y": 0, "w": 0, "h": 0},
+        "type": "UIIR node type",
+        "confidence": "number from 0 to 1",
+        "reason": "string",
+        "related_candidate_ids": ["string"]
+      }
+    ],
+    "render_diff_notes": [
+      {
+        "note_id": "string",
+        "severity": "info, minor, major, or critical",
+        "message": "string",
+        "related_candidate_ids": ["string"]
+      }
+    ]
+  }
+}
